@@ -1,0 +1,58 @@
+{
+  "name": "@clann/e2ee",
+  "version": "0.1.0",
+  "description": "The end-to-end encryption core used by the Clann family photo app: CLN1 file envelope, libsodium-compatible sealed boxes, signed device identities, and group-key exchange.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./cln1": "./dist/cln1.js",
+    "./sealedBox": "./dist/sealedBox.js",
+    "./identity": "./dist/identity.js",
+    "./groupKey": "./dist/groupKey.js",
+    "./keyWrap": "./dist/keyWrap.js",
+    "./deviceKeys": "./dist/deviceKeys.js",
+    "./recovery": "./dist/recovery.js",
+    "./bytes": "./dist/bytes.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "PROTOCOL.md",
+    "SECURITY.md",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-esm-extensions.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import ./test/hooks.mjs --test 'test/**/*.test.ts'",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "e2ee",
+    "end-to-end-encryption",
+    "x25519",
+    "ed25519",
+    "aes-gcm",
+    "crypto-box-seal",
+    "group-messaging",
+    "key-exchange"
+  ],
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@scure/bip39": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

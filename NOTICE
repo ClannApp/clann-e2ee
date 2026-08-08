@@ -1,0 +1,15 @@
+@clann/e2ee
+Copyright 2026 Clann
+
+This product includes software developed at Clann (https://getclann.com).
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full text.
+
+This library builds on the following third-party packages, each under its own
+licence (see their respective distributions):
+
+  - @noble/ciphers, @noble/curves, @noble/hashes  (MIT) — Paul Miller
+  - @scure/bip39                                  (MIT) — Paul Miller
+
+The sealed-box construction implemented in src/sealedBox.ts is wire-compatible
+with libsodium's crypto_box_seal; no libsodium code is included or derived.
