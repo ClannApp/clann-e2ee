@@ -587,6 +587,18 @@ every wrapped copy of that key. One per epoch, not one per recipient: it commits
 to the key, so it stays valid however many times the key is later re-sealed to
 devices admitted afterwards.
 
+`group_id` here means whatever identifier the host treats as the group's
+authenticated identity, and the choice matters. It must be one the server cannot
+reassign, and it must exist before the key is minted — otherwise a group created
+encrypted from birth has nothing to commit to, because its id does not exist
+until the server answers. Clann binds the **genesis id** (§5.6) for exactly
+these reasons: client-chosen, immutable, and signed by the founder before the
+group row exists. A server-assigned row id would satisfy neither.
+
+Where the commitment travels is the host's business — alongside each wrapped
+copy, or stored once against the epoch and served with it. What is not
+negotiable is that a client has one before adopting.
+
 Before adopting a key, a client MUST establish all of the following, and MUST
 fail closed if any fails:
 
@@ -617,6 +629,19 @@ What this does not cover is a device that was wrongly let in by a human. Such a
 device is in the trust graph, so keys it mints verify normally. That boundary is
 §9.2, and it is a property of the admission decision rather than of this
 mechanism.
+
+**Scope.** Provenance is a property a group has from birth. A group encrypted
+with a signed epoch-1 commitment requires one on **every** epoch thereafter; a
+group encrypted before this mechanism existed keeps its former behaviour, and
+the injection described above remains possible there. The two are distinguished
+explicitly rather than guessed at.
+
+Hosts MUST record which kind a group is at the moment it is encrypted, MUST
+refuse an uncommitted epoch for a group that requires them — otherwise a member
+on an older build can rotate it back into ambiguity — and MUST NOT allow the
+property to be cleared once set. Clients should pin it locally on first sight,
+since a server able to report "this group does not require commitments" could
+otherwise downgrade a protected group onto the unverified path.
 
 ---
 
@@ -817,7 +842,10 @@ and the scheme's security depends on all of them:
    proceeding defeats the entire scheme.
 6. **Store and serve epoch commitments.** Every epoch's commitment must be
    persisted when it is minted and returned alongside every wrapped copy of that
-   key (§6.6). A key served without one cannot be adopted by anyone.
+   key (§6.6). A key served without one cannot be adopted by anyone. Bind an
+   identifier the server cannot reassign and that exists before the key is
+   minted. Record at encryption time whether a group requires commitments,
+   refuse an uncommitted epoch for one that does, and never clear the flag.
 7. **Serve historical device records.** Provenance checks resolve
    `signer_device_id` years after the fact, so the device set a client verifies
    against must include devices that signed past epochs even once they have left
@@ -864,7 +892,7 @@ Run it with `npm test`.
 
 | Version | Date | Change |
 |---|---|---|
-| 1.1 | August 2026 | **Epoch commitments (§6.6).** Group keys are now signed by the device that mints them and verified against the trust graph before adoption, closing the group-key injection gap that version 1 documented as a known weakness; the remaining boundaries in §9 are renumbered accordingly. Breaking: `prepareGroupKeyFanout` requires `groupId`, `epoch` and `ownEdSecretKey`; `openGroupKey` and `openEpochKeys` require the commitment and a trust context; grants carry the minter's commitment. Hosts must store commitments and retain historical device records (§10). |
+| 1.1 | August 2026 | **Epoch commitments (§6.6).** Group keys are now signed by the device that mints them and verified against the trust graph before adoption, closing the group-key injection gap that version 1 documented as a known weakness, for groups encrypted from this version onward; the remaining boundaries in §9 are renumbered accordingly. Breaking: `prepareGroupKeyFanout` requires `groupId`, `epoch` and `ownEdSecretKey` and returns the epoch's commitment; `openGroupKey` requires the commitment and a trust context; `openEpochKeys` is removed, since a batch open cannot verify what it adopts. Hosts must store commitments against the epoch and retain historical device records (§10). |
 | 1 | August 2026 | Initial public specification of the shipped scheme. |
 
 ---

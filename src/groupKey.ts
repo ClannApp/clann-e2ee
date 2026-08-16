@@ -427,68 +427,19 @@ export function verifyGrantRecipient(recipient: GrantRecipient): boolean {
  * safety-code comparison is what strengthens it. PROTOCOL.md §9.2.
  */
 export function sealEpochsToRequester(
-  epochs: Array<{ epoch: number; key: Uint8Array; commitment: EpochCommitment }>,
+  epochs: Array<{ epoch: number; key: Uint8Array }>,
   requesterPublicKeyB64: Base64,
   random: RandomSource,
 ): EpochWrappedGroupKey[] {
   if (epochs.length === 0) {
     throw new Error('groupKey: this device holds no keys for the group');
   }
-  return epochs.map(({ epoch, key, commitment }) => {
-    // The original minter's commitment travels with the key rather than being
-    // reissued here. This device did not mint these epochs and must not claim
-    // to have: re-signing would make every grant look like a fresh mint, and
-    // the recipient would lose the ability to see who actually produced a key.
-    if (!commitment || commitment.epoch !== epoch) {
-      throw new Error(`groupKey: epoch ${epoch} has no matching commitment to pass on`);
-    }
-    return {
-      epoch,
-      wrapped_key: sealGroupKeyTo(key, requesterPublicKeyB64, random),
-      commitment,
-    };
-  });
-}
-
-/**
- * Open a batch of epoch-wrapped keys addressed to this device.
- *
- * Blobs that fail are reported rather than thrown on, because a single bad wrap
- * must not cost a device the epochs it *can* read. A bad wrap is a real
- * possibility: the server cannot verify that a wrap decrypts (it holds no
- * keys), so a buggy or malicious member client can store a blob that opens to
- * nothing. That is an availability problem, not a confidentiality one — see
- * PROTOCOL.md §9.1.
- *
- * Provenance failures are kept separate from unseal failures, because they mean
- * very different things. `failed` is the ordinary degradation above. `rejected`
- * is an epoch whose key opened but could not be shown to come from a trusted
- * member device, which is the signature of key injection and is worth
- * surfacing rather than retrying. Neither ends up in `opened`.
- */
-export function openEpochKeys(
-  wrapped: EpochWrappedGroupKey[],
-  kp: Pick<DeviceKeypair, 'publicKey' | 'secretKey'>,
-  ctx: EpochTrustContext,
-): {
-  opened: Array<{ epoch: number; key: Uint8Array; commitment: EpochCommitment }>;
-  failed: number[];
-  rejected: Array<{ epoch: number; reason: EpochProvenanceFailure }>;
-} {
-  const opened: Array<{ epoch: number; key: Uint8Array; commitment: EpochCommitment }> = [];
-  const failed: number[] = [];
-  const rejected: Array<{ epoch: number; reason: EpochProvenanceFailure }> = [];
-  for (const w of wrapped) {
-    try {
-      const key = openGroupKey(w.wrapped_key, kp, w.epoch, w.commitment, ctx);
-      opened.push({ epoch: w.epoch, key, commitment: w.commitment });
-    } catch (err) {
-      if (err instanceof EpochProvenanceError) {
-        rejected.push({ epoch: w.epoch, reason: err.reason });
-      } else {
-        failed.push(w.epoch);
-      }
-    }
-  }
-  return { opened, failed, rejected };
+  // Only the sealed keys travel. An epoch's provenance is per-epoch state that
+  // the host already holds against the epoch itself (§6.6), so a grant has no
+  // business re-stating it — and re-signing here would be worse than useless,
+  // since this device did not mint these epochs and must not claim it did.
+  return epochs.map(({ epoch, key }) => ({
+    epoch,
+    wrapped_key: sealGroupKeyTo(key, requesterPublicKeyB64, random),
+  }));
 }

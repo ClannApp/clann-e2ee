@@ -78,12 +78,17 @@ export interface WrappedGroupKey {
   wrapped_key: Base64;
 }
 
-/** A group key sealed for one epoch, as stored and returned per device. */
+/**
+ * A group key sealed for one epoch, as stored and returned per device.
+ *
+ * No commitment travels here. An epoch's provenance is per-epoch state the host
+ * stores against the epoch itself and serves alongside it; carrying a copy per
+ * wrap would invite treating the copy as authoritative. Adoption still requires
+ * one — {@link import('./groupKey').openGroupKey} fails closed without it.
+ */
 export interface EpochWrappedGroupKey {
   epoch: number;
   wrapped_key: Base64;
-  /** Provenance for this epoch's key. Required to adopt it (§6.6). */
-  commitment: EpochCommitment;
 }
 
 /** An X25519 encryption keypair plus its Ed25519 identity keypair. */

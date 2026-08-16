@@ -13,7 +13,6 @@ import {
   EpochProvenanceError,
   UnverifiedDevicesError,
   generateGroupKey,
-  openEpochKeys,
   openGroupKey,
   prepareGroupKeyFanout,
   sealEpochsToRequester,
@@ -26,6 +25,8 @@ import {
   signEpochCommitment,
 } from '../src/identity';
 import type { AttestationRecord, DeviceRecord, EpochCommitment } from '../src/types';
+import { sealOpen } from '../src/sealedBox';
+import { base64ToBytes } from '../src/bytes';
 import { keypair, makeDevice, pubKeys, seededRandom } from './helpers';
 
 const GROUP = 'G-oshea';
@@ -455,21 +456,20 @@ test('an unregistered device cannot mint an epoch', () => {
 
 // --- granting to a new device ----------------------------------------------
 
-/** Epochs as a granting device holds them: key plus the minter's commitment. */
+/**
+ * Open a grant's sealed blob directly.
+ *
+ * Grants carry keys and nothing else, so there is no commitment to check here —
+ * the recipient adopts through openGroupKey, against the commitment its host
+ * serves with the epoch. These tests are only asserting the sealing.
+ */
+function sealedBoxOpen(wrappedKeyB64: string, device: typeof gran): Uint8Array {
+  return sealOpen(base64ToBytes(wrappedKeyB64), device.publicKey, device.secretKey);
+}
+
+/** Epochs as a granting device holds them. */
 function heldEpochs(epochs: number[]) {
-  return epochs.map((epoch) => {
-    const key = new Uint8Array(32).fill(epoch);
-    return {
-      epoch,
-      key,
-      commitment: {
-        group_id: GROUP,
-        epoch,
-        signer_device_id: founder.record.id,
-        signature: signEpochCommitment(founder.edSecretKey, GROUP, epoch, key),
-      },
-    };
-  });
+  return epochs.map((epoch) => ({ epoch, key: new Uint8Array(32).fill(epoch) }));
 }
 
 test('a grant recipient with a partially swapped key is rejected', () => {
@@ -487,63 +487,37 @@ test('a grant covers every epoch, and the recipient can open them all', () => {
   const wrapped = sealEpochsToRequester(epochs, gran.publicKeyBase64, seededRandom());
   assert.deepEqual(wrapped.map((w) => w.epoch), [1, 2, 3]);
 
-  const { opened, failed, rejected } = openEpochKeys(wrapped, keypair(gran), everyone);
-  assert.deepEqual(failed, []);
-  assert.deepEqual(rejected, []);
-  assert.deepEqual(opened.map((o) => o.key), epochs.map((e) => e.key));
+  for (const [i, w] of wrapped.entries()) {
+    assert.deepEqual(
+      sealedBoxOpen(w.wrapped_key, gran),
+      epochs[i].key,
+      `epoch ${w.epoch}`,
+    );
+  }
 });
 
-test('a grant passes on the original minter, not the granting device', () => {
-  // Dad grants gran an epoch the founder minted. The commitment must still name
-  // the founder — a granting device that re-signed would erase the provenance
-  // it is supposed to be forwarding.
+test('a grant carries only sealed keys, never provenance', () => {
+  // Provenance is per-epoch state the host already holds against the epoch, and
+  // the granting device did not mint these epochs anyway — a grant that
+  // re-stated it would be claiming something this device cannot know.
   const wrapped = sealEpochsToRequester(heldEpochs([2]), gran.publicKeyBase64, seededRandom());
-  assert.equal(wrapped[0].commitment.signer_device_id, founder.record.id);
+  assert.deepEqual(Object.keys(wrapped[0]).sort(), ['epoch', 'wrapped_key']);
 });
 
 test('granting nothing is an error, not an empty success', () => {
   assert.throws(() => sealEpochsToRequester([], gran.publicKeyBase64, seededRandom()), /holds no keys/);
 });
 
-test('one unopenable wrap does not cost a device the epochs it can read', () => {
+test('a wrap sealed to the wrong device does not open here', () => {
   // The server cannot verify that a wrap decrypts, so a buggy client can store
-  // a blob that opens to nothing. It must degrade, not cascade.
-  const good = sealEpochsToRequester(heldEpochs([1]), gran.publicKeyBase64, seededRandom());
+  // a blob that opens to nothing. A recipient must fail on that one blob rather
+  // than lose the epochs it can read.
   const bad = sealEpochsToRequester(
     heldEpochs([2]),
     dad.publicKeyBase64, // sealed to the wrong device
     seededRandom(),
   );
-  const { opened, failed, rejected } = openEpochKeys([...good, ...bad], keypair(gran), everyone);
-  assert.deepEqual(opened.map((o) => o.epoch), [1]);
-  assert.deepEqual(failed, [2]);
-  assert.deepEqual(rejected, []);
-});
-
-test('one injected epoch does not cost a device the epochs it can read', () => {
-  // And it is reported as a rejection rather than as an ordinary bad wrap, so a
-  // host can tell "someone tried something" from "a wrap is corrupt".
-  const good = sealEpochsToRequester(heldEpochs([1]), gran.publicKeyBase64, seededRandom());
-  const forged = new Uint8Array(32).fill(0x99);
-  const injectedWrap = {
-    epoch: 2,
-    wrapped_key: sealGroupKeyTo(forged, gran.publicKeyBase64, seededRandom(77)),
-    commitment: {
-      group_id: GROUP,
-      epoch: 2,
-      signer_device_id: injected.record.id,
-      signature: signEpochCommitment(injected.edSecretKey, GROUP, 2, forged),
-    },
-  };
-
-  const { opened, failed, rejected } = openEpochKeys(
-    [...good, injectedWrap],
-    keypair(gran),
-    trustCtx([...everyone.devices, injected.record], everyone.attestations),
-  );
-  assert.deepEqual(opened.map((o) => o.epoch), [1]);
-  assert.deepEqual(failed, []);
-  assert.deepEqual(rejected, [{ epoch: 2, reason: 'untrusted-signer' }]);
+  assert.throws(() => sealedBoxOpen(bad[0].wrapped_key, gran), /failed to open/);
 });
 
 // --- rotation --------------------------------------------------------------
