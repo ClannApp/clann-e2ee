@@ -220,17 +220,27 @@ function assertEpochProvenance(
     throw new Error('groupKey: adopting a group key requires at least one trust root');
   }
 
+  // A signer nobody has heard of is a trust failure, not a signature failure —
+  // there is no key to check against, and reporting it as a bad signature would
+  // send whoever reads the diagnostic looking for corruption instead of for a
+  // device that should not be minting keys.
   const signer = ctx.devices.find((d) => d.id === commitment.signer_device_id);
-  const signatureOk =
-    !!signer &&
-    verifyEpochCommitment(
+  if (!signer) {
+    throw new EpochProvenanceError(
+      epoch,
+      'untrusted-signer',
+      `device ${commitment.signer_device_id} signed it and is not a device of this group`,
+    );
+  }
+  if (
+    !verifyEpochCommitment(
       commitment.signature,
       commitment.group_id,
       commitment.epoch,
       groupKey,
       signer.ed25519_public_key,
-    );
-  if (!signatureOk) {
+    )
+  ) {
     throw new EpochProvenanceError(
       epoch,
       'bad-signature',

@@ -588,9 +588,33 @@ test('an epoch stays openable after its minting device leaves the group', () => 
     key,
   );
 
+  // Drop dad from the set a host serves and the epoch stops opening — the
+  // failure this test exists to warn about. It reports 'untrusted-signer'
+  // rather than 'bad-signature': there is no key to check against, so the
+  // problem is that nobody in the group is this device, not that the bytes are
+  // wrong. Reading it the other way sends you hunting corruption.
   const currentOnly = trustCtx([founder.record, gran.record], [attest(founder, gran)]);
   assert.throws(
     () => openGroupKey(granCopy.wrapped_key, keypair(gran), 4, commitment, currentOnly),
-    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'bad-signature',
+    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'untrusted-signer',
+  );
+});
+
+test('a signer the group has never heard of is refused as untrusted', () => {
+  // The distinction the reason codes have to keep straight: an unknown signer
+  // is a trust failure. `injected` here has real keys and signs correctly — it
+  // is simply not one of this group's devices.
+  const forged = new Uint8Array(32).fill(0x99);
+  const blob = sealGroupKeyTo(forged, gran.publicKeyBase64, seededRandom(77));
+  const commitment: EpochCommitment = {
+    group_id: GROUP,
+    epoch: 9,
+    signer_device_id: injected.record.id,
+    signature: signEpochCommitment(injected.edSecretKey, GROUP, 9, forged),
+  };
+
+  assert.throws(
+    () => openGroupKey(blob, keypair(gran), 9, commitment, everyone),
+    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'untrusted-signer',
   );
 });
