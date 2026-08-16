@@ -1,6 +1,6 @@
 # The Clann E2EE protocol
 
-**Version 1 · Status: shipped, in staged rollout · Last revised August 2026**
+**Version 1.1 · Status: shipped, in staged rollout · Last revised August 2026**
 
 This document specifies the end-to-end encryption scheme used by [Clann](https://getclann.com),
 a family photo-sharing app. It is normative: where the implementation in this
@@ -52,11 +52,13 @@ opposition, and this protocol chooses the second one deliberately (§6.5).
 - A member's own new phone recovers access without another human being
   involved, and without any key reaching Clann's servers.
 - A removed member cannot read anything uploaded after their removal.
-- The scheme resists a *malicious* server, not merely a breached one, **for
-  device keys**: substitution of a device's encryption or identity key is
-  prevented or detected by the mechanisms in §5. This does **not** extend to
-  group keys — their provenance is unauthenticated, and §9.2 states what that
-  costs. Treat this goal as scoped to device identity until that is closed.
+- The scheme resists a *malicious* server, not merely a breached one. A server
+  cannot substitute a device's encryption or identity key without being
+  prevented or detected by the mechanisms in §5, and cannot mint a group key
+  clients will adopt, because an epoch is signed by the device that minted it
+  and verified against the trust graph before adoption (§6.6). What this goal
+  does not cover is a device wrongly admitted by a human approval: the scheme
+  authenticates keys, not people, and §9.2 is precise about the difference.
 
 **Non-goals.**
 
@@ -93,30 +95,26 @@ claims otherwise is mistaken about where its trust actually sits.
 
 ### 2.2 What is protected
 
-This table is about **device keys**. Every row below concerns the server
-substituting a device's encryption or identity key. It is not an exhaustive list
-of what a malicious server cannot do: group key material itself carries no
-provenance, so a server can mint an epoch key and have clients adopt it, and no
-row here prevents that. See §9.2.
+Every row is a thing a malicious server can attempt and what stops it. The
+common thread: no key is believed on the server's word, whether it is a device's
+key or a group's.
 
 | Against | By what | Where |
 |---|---|---|
 | Server reads photo/video content at rest | Media encrypted client-side under keys the server never holds | §3, §4 |
 | Server substitutes a co-member's encryption key while reusing their identity | Ed25519 self-signature binding both keys to a user id | §5.1 |
 | Server substitutes **your own** device's key back to you | Local pinning; the client never accepts the server's word about its own keypair | §5.3 |
-| Server injects a device into a rotation fan-out | Attestation chain from a signed root: a device no trusted device has attested blocks the rotation. Qualified by §9.3 | §5.5, §6.4 |
+| Server injects a device into a rotation fan-out | Attestation chain from a signed root: a device no trusted device has attested blocks the rotation. Qualified by §9.2 | §5.5, §6.4 |
 | Server names itself the trust root of a group | Founder-signed genesis, verified before any root is honoured | §5.6 |
+| Server mints a group key and publishes it as the next epoch | Epoch commitment: the minting device signs the key, and adopters refuse a signer outside the trust graph. Qualified by §9.2 | §6.6 |
+| Server replays a real epoch key as a different epoch or into another group | Group id and epoch bound into the commitment | §6.6 |
 | A removed member reads new uploads | Key epochs; rotation excludes them from the new epoch | §6.4 |
 | Truncation or splicing of encrypted files | Header-as-AAD and last-chunk-in-nonce | §4.3 |
 
 ### 2.3 Outside the scheme's scope
 
-The first item is a weakness rather than a boundary; the rest are deliberate and
-discussed where they arise.
+These are deliberate boundaries, discussed where they arise.
 
-- **Group key provenance.** Group keys are distributed in anonymous sealed
-  boxes and adopted without any check on who produced them, so a malicious
-  server can inject an epoch key of its choosing. §9.2.
 - **First-contact identity.** A self-signature proves a record is internally
   consistent, not that it belongs to a particular person. Clann uses the same
   trust-on-first-use model as iMessage; §5.2.
@@ -482,10 +480,13 @@ The group key is distributed by **fan-out**: sealed once per recipient device to
 that device's X25519 public key, using an anonymous sealed box. The server
 stores the blobs and can open none of them.
 
-"Anonymous" is load-bearing. The ephemeral secret is discarded after one use, so
-a sealed blob carries no evidence of who produced it, and the producer cannot
-re-open it either. Any "sealed by" field a server records is ordinary,
-forgeable bookkeeping — never proof.
+"Anonymous" is load-bearing, and it cuts both ways. The ephemeral secret is
+discarded after one use, so a sealed blob carries no evidence of who produced
+it, and the producer cannot re-open it either. Any "sealed by" field a server
+records is ordinary, forgeable bookkeeping — never proof. Provenance therefore
+has to be carried by a signature over the key itself rather than by the sealing,
+which is what §6.6 specifies; a fan-out emits one and an adopting device
+requires it.
 
 `prepareGroupKeyFanout` takes an explicit **policy**, because a fan-out that
 silently picked its own verification strength would be impossible to audit at
@@ -551,6 +552,71 @@ this product.
 
 The compensating control is epoch rotation, which bounds what a compromised
 device retains going forward.
+
+### 6.6 Epoch commitments: where a group key came from
+
+Sealing establishes that a key reached the right device. It establishes nothing
+about who sent it, because the seal is anonymous (§6.3): any party holding a
+device's X25519 public key — the server included, since it stores and serves
+that key — can construct a blob that device opens. Without a further check, a
+server could generate 32 bytes of its own, seal them to every member, publish
+them as the next epoch, and read everything written under it.
+
+The §5 machinery does not close this by itself. Self-signatures, own-device
+pinning, the attestation chain and genesis all authenticate *which device a key
+belongs to*; none of them says anything about where a *group* key came from, and
+an attack that substitutes no device key passes all of them.
+
+So a group key is signed by the device that mints it. The signature covers:
+
+```
+clann-e2ee-epoch-v1|{group_id}|{epoch}|{base64(sha256(group_key))}
+```
+
+The digest rather than the key, so that committing to a key never puts key
+material into a value meant to be published. Both `group_id` and `epoch` are
+bound, and neither is redundant: without the group id a commitment could be
+replayed into another group its signer belongs to, and without the epoch it
+could be replayed as a later epoch of the same group. In each case the server
+would be re-serving a real key, which is why a signature over the key alone
+would not catch it.
+
+The result travels as an **epoch commitment** — `group_id`, `epoch`,
+`signer_device_id`, `signature` — stored once per epoch and served alongside
+every wrapped copy of that key. One per epoch, not one per recipient: it commits
+to the key, so it stays valid however many times the key is later re-sealed to
+devices admitted afterwards.
+
+Before adopting a key, a client MUST establish all of the following, and MUST
+fail closed if any fails:
+
+1. the blob opens with this device's X25519 secret key;
+2. the commitment's `group_id` and `epoch` are the ones being requested;
+3. the signature verifies against the Ed25519 identity of `signer_device_id`,
+   over the digest of the key that actually opened;
+4. `signer_device_id` is **trusted**, by the same trust-graph walk a fan-out
+   uses on its recipients (§5.5) — a valid signature from a device nobody has
+   vouched for is precisely what an injecting server would produce.
+
+Checks 3 and 4 are separate and both required. This is the step that is easy to
+get wrong: verifying a signature without asking whose it is leaves the attack
+completely intact.
+
+A server holding no trusted device's Ed25519 secret key cannot satisfy 3 and 4
+together, and so cannot mint an epoch that any client will adopt.
+
+Two consequences worth stating. **A grant forwards the original minter's
+commitment** rather than re-signing (§6.3): the granting device did not mint
+those epochs and must not claim to, or the recipient loses sight of who actually
+produced a key. And because commitments must verify years later, the device set
+a client checks against has to include the devices that *signed past epochs*,
+even after they leave the group — an obligation on the host, in §10, and a
+data-loss bug if missed rather than a security one.
+
+What this does not cover is a device that was wrongly let in by a human. Such a
+device is in the trust graph, so keys it mints verify normally. That boundary is
+§9.2, and it is a property of the admission decision rather than of this
+mechanism.
 
 ---
 
@@ -682,44 +748,7 @@ not open, leaving other members with media they cannot decrypt. That is an
 availability concern rather than a confidentiality one, and on the ordinary
 upload path it costs a single photo.
 
-### 9.2 Group keys are adopted without provenance
-
-Group keys travel in anonymous sealed boxes (§3.1, §6.3). An anonymous seal
-authenticates the *contents* against modification after sealing; it does not
-authenticate the *sealer*. Anyone holding a device's X25519 public key — which
-the server stores and serves — can construct a sealed box that device will open.
-
-Nothing in the adopt path checks further. `openGroupKey` unseals and returns the
-bytes; `openEpochKeys` loops it. There is no signature over key material, no
-commitment, and no comparison against an independent source.
-
-The consequence: a malicious server can generate 32 bytes of its own, seal them
-to every member device, publish them as the next epoch, and clients will adopt
-that key and encrypt subsequent uploads under it. Everything written under the
-injected epoch is readable by the server.
-
-Three properties of that attack are worth stating precisely:
-
-- **The §5 machinery does not engage.** Self-signatures, own-device pinning,
-  the attestation chain and genesis all authenticate *which device a key belongs
-  to*. None of them says anything about where a group key came from, so an
-  attack that substitutes no device key passes all of them.
-- **Scope is forward-only.** Earlier epochs were minted on member devices and
-  the server never saw them; media under those epochs stays confidential. The
-  loss begins at the injected epoch.
-- **It is not currently detectable client-side.** Every device receives a
-  consistent copy, so no cross-device disagreement surfaces. The
-  `wrapped_by_device_id` recorded alongside each blob is an ordinary
-  server-written field with no signature behind it, and is not evidence.
-
-The fix is additive and follows the pattern §5 already uses: have the minting
-device sign a commitment to the key with its Ed25519 identity — for example
-`clann-e2ee-epoch-v1|{group_id}|{epoch}|{sha256(group_key)}` — and have clients
-verify that signature, and that the signer is trusted, before adopting. A server
-holding no trusted device's signing key then cannot mint an epoch. This is not
-implemented at the time of writing.
-
-### 9.3 Grant-time trust propagates into the chain
+### 9.2 Grant-time trust propagates into the chain
 
 Granting keys (§6.3) verifies the recipient's self-signature, seals it every
 epoch the group holds, and then attests it — entering it into the trust graph.
@@ -741,18 +770,18 @@ availability — a partial grant silently leaves a real member unable to read ol
 photos — but it does mean a bad approval reaches the group's history, not just
 its future.
 
-### 9.4 Metadata
+### 9.3 Metadata
 
 Covered in §8. Out of scope for this protocol.
 
-### 9.5 One wrapped key per item, per group
+### 9.4 One wrapped key per item, per group
 
 An item's `enc_meta` carries exactly one DEK wrapped under one group's key.
 Sharing an encrypted item into a *second* encrypted group is therefore not
 possible without a device that belongs to both re-wrapping the DEK, and Clann
 currently blocks the operation rather than doing so.
 
-### 9.6 Rotation is performed by member devices
+### 9.5 Rotation is performed by member devices
 
 The server cannot rotate, having no key. Rotation is carried out by the first
 member device that both holds the current epoch and has permission, so a group
@@ -760,7 +789,7 @@ continues on its existing epoch until such a device comes online. Removal of a
 member takes effect for new uploads from that point; the interval is a function
 of app usage rather than of the protocol.
 
-### 9.7 Server-side media operations require plaintext
+### 9.6 Server-side media operations require plaintext
 
 Operations that read pixels server-side — rotation, blur-on-the-fly, print
 fulfilment — are not available for encrypted groups, and the equivalent work is
@@ -783,13 +812,22 @@ and the scheme's security depends on all of them:
    is reviewing the list in that moment; `attestation-chain` everywhere else
    (§6.3).
 5. **Never fall back on a verification failure.** `UnverifiedDevicesError`,
-   `OwnDeviceKeyMismatchError` and `GenesisVerificationError` are all fail-closed
-   signals. Catching one and proceeding defeats the entire scheme.
-6. **Surface trust changes to humans.** The first-contact gap is closed by
+   `OwnDeviceKeyMismatchError`, `GenesisVerificationError` and
+   `EpochProvenanceError` are all fail-closed signals. Catching one and
+   proceeding defeats the entire scheme.
+6. **Store and serve epoch commitments.** Every epoch's commitment must be
+   persisted when it is minted and returned alongside every wrapped copy of that
+   key (§6.6). A key served without one cannot be adopted by anyone.
+7. **Serve historical device records.** Provenance checks resolve
+   `signer_device_id` years after the fact, so the device set a client verifies
+   against must include devices that signed past epochs even once they have left
+   the group. Serving only current members makes old epochs unopenable — a
+   data-loss bug, and one that surfaces long after the change that caused it.
+8. **Surface trust changes to humans.** The first-contact gap is closed by
    detection (§5.7), which only works if a person is actually told.
-7. **Grant all epochs.** Never a subset (§6.3).
-8. **Strip EXIF and location data client-side** before encrypting, if the
-   claims in §8 are to hold.
+9. **Grant all epochs.** Never a subset (§6.3).
+10. **Strip EXIF and location data client-side** before encrypting, if the
+    claims in §8 are to hold.
 
 ---
 
@@ -812,8 +850,11 @@ orphans every phrase in the wild, so it is asserted rather than assumed.
 The suite also asserts several *negative* properties directly — that truncation
 fails, that chunks cannot be spliced between files, that a partially swapped key
 is refused under both policies, that a server-minted device passes the
-`self-signature` policy and is refused by `attestation-chain`, and that a
-removed member cannot open a post-rotation epoch.
+`self-signature` policy and is refused by `attestation-chain`, that a removed
+member cannot open a post-rotation epoch, and — for §6.6 — that a key with no
+commitment, a key signed by an untrusted device, a genuine commitment reused
+over a substituted key, and a commitment replayed from another epoch or another
+group are each refused.
 
 Run it with `npm test`.
 
@@ -823,6 +864,7 @@ Run it with `npm test`.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.1 | August 2026 | **Epoch commitments (§6.6).** Group keys are now signed by the device that mints them and verified against the trust graph before adoption, closing the group-key injection gap that version 1 documented as a known weakness; the remaining boundaries in §9 are renumbered accordingly. Breaking: `prepareGroupKeyFanout` requires `groupId`, `epoch` and `ownEdSecretKey`; `openGroupKey` and `openEpochKeys` require the commitment and a trust context; grants carry the minter's commitment. Hosts must store commitments and retain historical device records (§10). |
 | 1 | August 2026 | Initial public specification of the shipped scheme. |
 
 ---

@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  EpochProvenanceError,
   UnverifiedDevicesError,
   generateGroupKey,
   openEpochKeys,
@@ -19,9 +20,15 @@ import {
   sealGroupKeyTo,
   verifyGrantRecipient,
 } from '../src/groupKey';
-import { OwnDeviceKeyMismatchError, signAttestation } from '../src/identity';
-import type { AttestationRecord, DeviceRecord } from '../src/types';
+import {
+  OwnDeviceKeyMismatchError,
+  signAttestation,
+  signEpochCommitment,
+} from '../src/identity';
+import type { AttestationRecord, DeviceRecord, EpochCommitment } from '../src/types';
 import { keypair, makeDevice, pubKeys, seededRandom } from './helpers';
+
+const GROUP = 'G-oshea';
 
 const founder = makeDevice('D-founder', 'U-mum', 0x01);
 const dad = makeDevice('D-dad', 'U-dad', 0x02);
@@ -38,16 +45,29 @@ function attest(from: typeof founder, to: typeof dad): AttestationRecord {
 }
 
 const baseReq = {
+  groupId: GROUP,
+  epoch: 1,
   ownDeviceId: founder.record.id,
   ownPublicKeys: pubKeys(founder),
+  ownEdSecretKey: founder.edSecretKey,
   random: seededRandom(),
 };
+
+/** What a device consults to decide whether to believe an epoch's signer. */
+function trustCtx(devices: DeviceRecord[], attestations: AttestationRecord[] = []) {
+  return { groupId: GROUP, devices, attestations, rootDeviceIds: [founder.record.id] };
+}
+
+const everyone = trustCtx(
+  [founder.record, dad.record, gran.record],
+  [attest(founder, dad), attest(founder, gran)],
+);
 
 // --- the happy path --------------------------------------------------------
 
 test('seals one copy per device, and each device can open its own', () => {
   const groupKey = generateGroupKey(seededRandom(9));
-  const { wrappedKeys } = prepareGroupKeyFanout({
+  const { wrappedKeys, commitment } = prepareGroupKeyFanout({
     ...baseReq,
     groupKey,
     devices: [founder.record, dad.record, gran.record],
@@ -58,20 +78,40 @@ test('seals one copy per device, and each device can open its own', () => {
   assert.equal(wrappedKeys.length, 3);
   for (const [i, device] of [founder, dad, gran].entries()) {
     assert.equal(wrappedKeys[i].device_id, device.record.id);
-    assert.deepEqual(openGroupKey(wrappedKeys[i].wrapped_key, keypair(device)), groupKey);
+    assert.deepEqual(
+      openGroupKey(wrappedKeys[i].wrapped_key, keypair(device), 1, commitment, everyone),
+      groupKey,
+    );
   }
+});
+
+test('the epoch is signed by the device that minted it', () => {
+  const { commitment } = prepareGroupKeyFanout({
+    ...baseReq,
+    epoch: 7,
+    groupKey: generateGroupKey(seededRandom(9)),
+    devices: [founder.record, dad.record],
+    policy: 'self-signature',
+    random: seededRandom(),
+  });
+  assert.equal(commitment.signer_device_id, founder.record.id);
+  assert.equal(commitment.group_id, GROUP);
+  assert.equal(commitment.epoch, 7);
 });
 
 test('a device cannot open a copy sealed to someone else', () => {
   const groupKey = generateGroupKey(seededRandom(9));
-  const { wrappedKeys } = prepareGroupKeyFanout({
+  const { wrappedKeys, commitment } = prepareGroupKeyFanout({
     ...baseReq,
     groupKey,
     devices: [founder.record, dad.record],
     policy: 'self-signature',
     random: seededRandom(),
   });
-  assert.throws(() => openGroupKey(wrappedKeys[1].wrapped_key, keypair(gran)), /failed to open/);
+  assert.throws(
+    () => openGroupKey(wrappedKeys[1].wrapped_key, keypair(gran), 1, commitment, everyone),
+    /failed to open/,
+  );
 });
 
 test('every recipient gets a distinct sealed blob', () => {
@@ -163,42 +203,160 @@ test('a server-minted device is refused by the attestation-chain policy', () => 
   }
 });
 
-test('a group key carries no provenance — anyone can seal one we accept (§9.2)', () => {
-  // Sealed boxes are anonymous. `injected` here stands in for a malicious
-  // server: it holds only gran's PUBLIC key, which the server stores and
-  // serves, and yet it can produce a blob gran opens as a group key.
-  //
-  // Nothing in the adopt path distinguishes this from a key minted by a real
-  // member device, so the server can publish it as the next epoch and read
-  // everything written under it. Pinned because §2.2's table would otherwise
-  // read as if key substitution were covered generally.
-  //
-  // If this starts failing, provenance checking landed and §9.2 is stale.
+// --- key injection: provenance on the adopt path (§6.6) ---------------------
+
+test('a key sealed by the server, with no commitment, is refused', () => {
+  // The core of §6.6. Sealed boxes are anonymous, so the server — holding only
+  // gran's PUBLIC key, which it stores and serves — can produce a blob gran
+  // opens as a group key. What it cannot produce is a signature from a device
+  // gran trusts, so the key is unsealed and then thrown away.
   const forged = new Uint8Array(32).fill(0x99);
   const blob = sealGroupKeyTo(forged, gran.publicKeyBase64, seededRandom(77));
 
-  assert.deepEqual(openGroupKey(blob, keypair(gran)), forged);
-
-  const { opened, failed } = openEpochKeys([{ epoch: 9, wrapped_key: blob }], keypair(gran));
-  assert.deepEqual(failed, []);
-  assert.deepEqual(opened[0].key, forged);
+  assert.throws(
+    () => openGroupKey(blob, keypair(gran), 9, undefined, everyone),
+    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'missing',
+  );
 });
 
-test('an attested device stays chain-trusted in later fan-outs (§9.3)', () => {
+test('a key the server signed with its own device is refused', () => {
+  // The obvious next move: mint a key AND a commitment. It fails on trust, not
+  // on the signature — which is valid — because nobody has vouched for the
+  // signing device.
+  const forged = new Uint8Array(32).fill(0x99);
+  const blob = sealGroupKeyTo(forged, gran.publicKeyBase64, seededRandom(77));
+  const selfSigned: EpochCommitment = {
+    group_id: GROUP,
+    epoch: 9,
+    signer_device_id: injected.record.id,
+    signature: signEpochCommitment(injected.edSecretKey, GROUP, 9, forged),
+  };
+
+  assert.throws(
+    () =>
+      openGroupKey(blob, keypair(gran), 9, selfSigned, trustCtx([...everyone.devices, injected.record], everyone.attestations)),
+    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'untrusted-signer',
+  );
+});
+
+test('a real commitment cannot be reused to launder a substituted key', () => {
+  // The server keeps the founder's genuine commitment for epoch 5 but seals a
+  // key of its own. The commitment covers a digest of the real key, so it no
+  // longer verifies against what was actually delivered.
+  const real = generateGroupKey(seededRandom(5));
+  const { commitment } = prepareGroupKeyFanout({
+    ...baseReq,
+    epoch: 5,
+    groupKey: real,
+    devices: [founder.record, gran.record],
+    policy: 'self-signature',
+    random: seededRandom(),
+  });
+
+  const forged = new Uint8Array(32).fill(0x99);
+  const blob = sealGroupKeyTo(forged, gran.publicKeyBase64, seededRandom(77));
+
+  assert.throws(
+    () => openGroupKey(blob, keypair(gran), 5, commitment, everyone),
+    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'bad-signature',
+  );
+});
+
+test('a commitment from another epoch is refused as a replay', () => {
+  const key = generateGroupKey(seededRandom(3));
+  const { wrappedKeys, commitment } = prepareGroupKeyFanout({
+    ...baseReq,
+    epoch: 3,
+    groupKey: key,
+    devices: [founder.record, gran.record],
+    policy: 'self-signature',
+    random: seededRandom(),
+  });
+  const granCopy = wrappedKeys.find((w) => w.device_id === gran.record.id)!;
+
+  // Same key, same signer, replayed as a later epoch.
+  assert.throws(
+    () => openGroupKey(granCopy.wrapped_key, keypair(gran), 4, commitment, everyone),
+    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'mismatched-epoch',
+  );
+});
+
+test('a commitment from another group is refused', () => {
+  const key = generateGroupKey(seededRandom(3));
+  const { wrappedKeys, commitment } = prepareGroupKeyFanout({
+    ...baseReq,
+    groupId: 'G-elsewhere',
+    groupKey: key,
+    devices: [founder.record, gran.record],
+    policy: 'self-signature',
+    random: seededRandom(),
+  });
+  const granCopy = wrappedKeys.find((w) => w.device_id === gran.record.id)!;
+
+  assert.throws(
+    () => openGroupKey(granCopy.wrapped_key, keypair(gran), 1, commitment, everyone),
+    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'mismatched-group',
+  );
+});
+
+test('adopting refuses to run with no trust root', () => {
+  // A misconfiguration, not an attack — and it must not read like one.
+  const key = generateGroupKey(seededRandom(3));
+  const { wrappedKeys, commitment } = prepareGroupKeyFanout({
+    ...baseReq,
+    groupKey: key,
+    devices: [founder.record, gran.record],
+    policy: 'self-signature',
+    random: seededRandom(),
+  });
+  const granCopy = wrappedKeys.find((w) => w.device_id === gran.record.id)!;
+
+  assert.throws(
+    () =>
+      openGroupKey(granCopy.wrapped_key, keypair(gran), 1, commitment, {
+        ...everyone,
+        rootDeviceIds: [],
+      }),
+    /trust root/,
+  );
+});
+
+test('an epoch signed by a transitively trusted device is adopted', () => {
+  // Dad mints, having been attested by the founder. Gran has never met dad's
+  // device directly and still adopts, because the chain reaches him.
+  const key = generateGroupKey(seededRandom(4));
+  const { wrappedKeys, commitment } = prepareGroupKeyFanout({
+    groupId: GROUP,
+    epoch: 2,
+    ownDeviceId: dad.record.id,
+    ownPublicKeys: pubKeys(dad),
+    ownEdSecretKey: dad.edSecretKey,
+    groupKey: key,
+    devices: [founder.record, dad.record, gran.record],
+    policy: 'self-signature',
+    random: seededRandom(),
+  });
+  const granCopy = wrappedKeys.find((w) => w.device_id === gran.record.id)!;
+
+  assert.deepEqual(openGroupKey(granCopy.wrapped_key, keypair(gran), 2, commitment, everyone), key);
+});
+
+test('an attested device stays chain-trusted in later fan-outs (§9.2)', () => {
   // Above, the injected device is refused by attestation-chain because nobody
   // vouched for it. But granting keys attests the recipient after checking only
   // a self-signature (verifyGrantRecipient), so one approval promotes it to
   // chain-verified and later rotations include it without further review.
   //
-  // Pinned here because it qualifies the §2.2 protection claim. If this ever
-  // starts failing, the trust model got stronger and §9.2 needs rewriting.
+  // Pinned here because it qualifies the §2.2 protection claim: epoch
+  // commitments stop the server minting keys, not a device admitted by a bad
+  // approval. If this ever starts failing, the trust model got stronger.
   const grantAttestation: AttestationRecord = {
     attested_device_id: injected.record.id,
     attester_device_id: founder.record.id,
     signature: signAttestation(founder.edSecretKey, injected.record),
   };
 
-  const { wrappedKeys } = prepareGroupKeyFanout({
+  const { wrappedKeys, commitment } = prepareGroupKeyFanout({
     ...baseReq,
     groupKey: generateGroupKey(seededRandom(9)),
     devices: [founder.record, injected.record],
@@ -212,7 +370,11 @@ test('an attested device stays chain-trusted in later fan-outs (§9.3)', () => {
   assert.ok(toInjected, 'attestation-chain admitted the injected device');
   // And it really can read the group key — this is a confidentiality loss, not
   // a bookkeeping curiosity.
-  assert.equal(openGroupKey(toInjected.wrapped_key, keypair(injected)).length, 32);
+  const ctx = trustCtx([founder.record, injected.record], [grantAttestation]);
+  assert.equal(
+    openGroupKey(toInjected.wrapped_key, keypair(injected), 1, commitment, ctx).length,
+    32,
+  );
 });
 
 test('attestation-chain accepts a device vouched for transitively', () => {
@@ -274,7 +436,41 @@ test('a wrong-sized group key is refused', () => {
   );
 });
 
+test('an unregistered device cannot mint an epoch', () => {
+  // Nothing it signed could be verified by anyone, so the commitment would be
+  // dead on arrival. Better to say so than to emit an unusable epoch.
+  assert.throws(
+    () =>
+      prepareGroupKeyFanout({
+        ...baseReq,
+        ownDeviceId: '' as unknown as string,
+        groupKey: generateGroupKey(seededRandom(9)),
+        devices: [founder.record],
+        policy: 'self-signature',
+        random: seededRandom(),
+      }),
+    /registered own device id/,
+  );
+});
+
 // --- granting to a new device ----------------------------------------------
+
+/** Epochs as a granting device holds them: key plus the minter's commitment. */
+function heldEpochs(epochs: number[]) {
+  return epochs.map((epoch) => {
+    const key = new Uint8Array(32).fill(epoch);
+    return {
+      epoch,
+      key,
+      commitment: {
+        group_id: GROUP,
+        epoch,
+        signer_device_id: founder.record.id,
+        signature: signEpochCommitment(founder.edSecretKey, GROUP, epoch, key),
+      },
+    };
+  });
+}
 
 test('a grant recipient with a partially swapped key is rejected', () => {
   assert.equal(verifyGrantRecipient(gran.record), true);
@@ -287,17 +483,22 @@ test('a grant recipient with a partially swapped key is rejected', () => {
 test('a grant covers every epoch, and the recipient can open them all', () => {
   // Granting only the latest epoch is the classic half-grant bug: the device
   // activates, looks fine, and cannot read the family's older photos.
-  const epochs = [
-    { epoch: 1, key: new Uint8Array(32).fill(1) },
-    { epoch: 2, key: new Uint8Array(32).fill(2) },
-    { epoch: 3, key: new Uint8Array(32).fill(3) },
-  ];
+  const epochs = heldEpochs([1, 2, 3]);
   const wrapped = sealEpochsToRequester(epochs, gran.publicKeyBase64, seededRandom());
   assert.deepEqual(wrapped.map((w) => w.epoch), [1, 2, 3]);
 
-  const { opened, failed } = openEpochKeys(wrapped, keypair(gran));
+  const { opened, failed, rejected } = openEpochKeys(wrapped, keypair(gran), everyone);
   assert.deepEqual(failed, []);
-  assert.deepEqual(opened, epochs);
+  assert.deepEqual(rejected, []);
+  assert.deepEqual(opened.map((o) => o.key), epochs.map((e) => e.key));
+});
+
+test('a grant passes on the original minter, not the granting device', () => {
+  // Dad grants gran an epoch the founder minted. The commitment must still name
+  // the founder — a granting device that re-signed would erase the provenance
+  // it is supposed to be forwarding.
+  const wrapped = sealEpochsToRequester(heldEpochs([2]), gran.publicKeyBase64, seededRandom());
+  assert.equal(wrapped[0].commitment.signer_device_id, founder.record.id);
 });
 
 test('granting nothing is an error, not an empty success', () => {
@@ -307,19 +508,42 @@ test('granting nothing is an error, not an empty success', () => {
 test('one unopenable wrap does not cost a device the epochs it can read', () => {
   // The server cannot verify that a wrap decrypts, so a buggy client can store
   // a blob that opens to nothing. It must degrade, not cascade.
-  const good = sealEpochsToRequester(
-    [{ epoch: 1, key: new Uint8Array(32).fill(1) }],
-    gran.publicKeyBase64,
-    seededRandom(),
-  );
+  const good = sealEpochsToRequester(heldEpochs([1]), gran.publicKeyBase64, seededRandom());
   const bad = sealEpochsToRequester(
-    [{ epoch: 2, key: new Uint8Array(32).fill(2) }],
+    heldEpochs([2]),
     dad.publicKeyBase64, // sealed to the wrong device
     seededRandom(),
   );
-  const { opened, failed } = openEpochKeys([...good, ...bad], keypair(gran));
+  const { opened, failed, rejected } = openEpochKeys([...good, ...bad], keypair(gran), everyone);
   assert.deepEqual(opened.map((o) => o.epoch), [1]);
   assert.deepEqual(failed, [2]);
+  assert.deepEqual(rejected, []);
+});
+
+test('one injected epoch does not cost a device the epochs it can read', () => {
+  // And it is reported as a rejection rather than as an ordinary bad wrap, so a
+  // host can tell "someone tried something" from "a wrap is corrupt".
+  const good = sealEpochsToRequester(heldEpochs([1]), gran.publicKeyBase64, seededRandom());
+  const forged = new Uint8Array(32).fill(0x99);
+  const injectedWrap = {
+    epoch: 2,
+    wrapped_key: sealGroupKeyTo(forged, gran.publicKeyBase64, seededRandom(77)),
+    commitment: {
+      group_id: GROUP,
+      epoch: 2,
+      signer_device_id: injected.record.id,
+      signature: signEpochCommitment(injected.edSecretKey, GROUP, 2, forged),
+    },
+  };
+
+  const { opened, failed, rejected } = openEpochKeys(
+    [...good, injectedWrap],
+    keypair(gran),
+    trustCtx([...everyone.devices, injected.record], everyone.attestations),
+  );
+  assert.deepEqual(opened.map((o) => o.epoch), [1]);
+  assert.deepEqual(failed, []);
+  assert.deepEqual(rejected, [{ epoch: 2, reason: 'untrusted-signer' }]);
 });
 
 // --- rotation --------------------------------------------------------------
@@ -330,6 +554,7 @@ test('rotation excludes a removed device without disturbing the old epoch', () =
   const epoch1 = generateGroupKey(seededRandom(1));
   const before = prepareGroupKeyFanout({
     ...baseReq,
+    epoch: 1,
     groupKey: epoch1,
     devices: [founder.record, dad.record, gran.record],
     policy: 'self-signature',
@@ -339,6 +564,7 @@ test('rotation excludes a removed device without disturbing the old epoch', () =
   const epoch2 = generateGroupKey(seededRandom(2));
   const after = prepareGroupKeyFanout({
     ...baseReq,
+    epoch: 2,
     groupKey: epoch2,
     devices: [founder.record, dad.record], // gran removed
     attestations: [attest(founder, dad)],
@@ -348,9 +574,49 @@ test('rotation excludes a removed device without disturbing the old epoch', () =
   });
 
   const granEpoch1 = before.wrappedKeys.find((w) => w.device_id === gran.record.id)!;
-  assert.deepEqual(openGroupKey(granEpoch1.wrapped_key, keypair(gran)), epoch1);
+  assert.deepEqual(
+    openGroupKey(granEpoch1.wrapped_key, keypair(gran), 1, before.commitment, everyone),
+    epoch1,
+  );
   assert.equal(after.wrappedKeys.some((w) => w.device_id === gran.record.id), false);
   for (const w of after.wrappedKeys) {
-    assert.throws(() => openGroupKey(w.wrapped_key, keypair(gran)), /failed to open/);
+    assert.throws(
+      () => openGroupKey(w.wrapped_key, keypair(gran), 2, after.commitment, everyone),
+      /failed to open/,
+    );
   }
+});
+
+test('an epoch stays openable after its minting device leaves the group', () => {
+  // The migration hazard worth a test. Dad mints, then leaves. Gran must still
+  // be able to open that epoch, which she can only do if the host keeps serving
+  // dad's device record. See EpochTrustContext.
+  const key = generateGroupKey(seededRandom(6));
+  const { wrappedKeys, commitment } = prepareGroupKeyFanout({
+    groupId: GROUP,
+    epoch: 4,
+    ownDeviceId: dad.record.id,
+    ownPublicKeys: pubKeys(dad),
+    ownEdSecretKey: dad.edSecretKey,
+    groupKey: key,
+    devices: [founder.record, dad.record, gran.record],
+    policy: 'self-signature',
+    random: seededRandom(),
+  });
+  const granCopy = wrappedKeys.find((w) => w.device_id === gran.record.id)!;
+
+  const withHistory = trustCtx(
+    [founder.record, gran.record, dad.record], // dad retained as a past signer
+    [attest(founder, dad), attest(founder, gran)],
+  );
+  assert.deepEqual(
+    openGroupKey(granCopy.wrapped_key, keypair(gran), 4, commitment, withHistory),
+    key,
+  );
+
+  const currentOnly = trustCtx([founder.record, gran.record], [attest(founder, gran)]);
+  assert.throws(
+    () => openGroupKey(granCopy.wrapped_key, keypair(gran), 4, commitment, currentOnly),
+    (err: unknown) => err instanceof EpochProvenanceError && err.reason === 'bad-signature',
+  );
 });

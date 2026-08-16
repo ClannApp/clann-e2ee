@@ -22,7 +22,7 @@
  *     new phone in") rather than along server assertions. Its limit is easy to
  *     miss: a grant attests its recipient after checking only a self-signature,
  *     so the graph inherits that admission rather than re-deriving it. See
- *     PROTOCOL.md §9.3.
+ *     PROTOCOL.md §9.2.
  *  3. **Genesis.** The root itself is signed by the founding device. Without
  *     this, the server chooses the root of the graph — and whoever chooses the
  *     root chooses the graph.
@@ -36,6 +36,7 @@
  */
 
 import { ed25519 } from '@noble/curves/ed25519.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 
 import { bytesToBase64, base64ToBytes } from './bytes';
 import type {
@@ -71,6 +72,30 @@ export function genesisMessage(
   return utf8(`clann-e2ee-genesis-v1|${genesisId}|${founderDeviceId}|${founderUserId}`);
 }
 
+/**
+ * A commitment to a group key's *identity*, without revealing it.
+ *
+ * `clann-e2ee-epoch-v1|{group_id}|{epoch}|{b64(sha256(group_key))}`
+ *
+ * The digest rather than the key itself, so that signing never puts key
+ * material into a value designed to be published. The group id and epoch are
+ * both bound because neither alone is enough: without the group id a
+ * commitment could be replayed into another group the signer belongs to, and
+ * without the epoch it could be replayed as a later epoch of the same group.
+ */
+export function epochCommitmentMessage(
+  groupId: string,
+  epoch: number,
+  groupKeyDigestB64: Base64,
+): Uint8Array {
+  return utf8(`clann-e2ee-epoch-v1|${groupId}|${epoch}|${groupKeyDigestB64}`);
+}
+
+/** The digest a group key is committed to by {@link epochCommitmentMessage}. */
+export function groupKeyDigest(groupKey: Uint8Array): Base64 {
+  return bytesToBase64(sha256(groupKey));
+}
+
 function verify(sigB64: Base64, message: Uint8Array, pkB64: Base64): boolean {
   try {
     return ed25519.verify(base64ToBytes(sigB64), message, base64ToBytes(pkB64));
@@ -101,6 +126,50 @@ export function signAttestation(
       attestationMessage(target.id, target.x25519_public_key, target.ed25519_public_key ?? ''),
       edSecretKey,
     ),
+  );
+}
+
+/**
+ * Sign a group key on minting it, so adopters can tell where it came from.
+ *
+ * This is what makes a group key more than an anonymous 32 bytes: a sealed box
+ * proves only that the contents reached the right device, never who sealed
+ * them. A device that verifies this signature, and that its signer is trusted,
+ * knows the key was minted inside the group rather than handed to it by the
+ * server. See PROTOCOL.md §6.6.
+ */
+export function signEpochCommitment(
+  edSecretKey: Uint8Array,
+  groupId: string,
+  epoch: number,
+  groupKey: Uint8Array,
+): Base64 {
+  return bytesToBase64(
+    ed25519.sign(epochCommitmentMessage(groupId, epoch, groupKeyDigest(groupKey)), edSecretKey),
+  );
+}
+
+/**
+ * Whether a commitment really covers this key, for this group and epoch.
+ *
+ * This checks the signature only. It says nothing about whether the *signer*
+ * should be believed — that is a trust-graph question, and
+ * {@link import('./groupKey').openGroupKey} answers both together. Verifying
+ * one without the other is the mistake worth guarding against: a signature
+ * from the server's own device verifies perfectly well.
+ */
+export function verifyEpochCommitment(
+  signatureB64: Base64,
+  groupId: string,
+  epoch: number,
+  groupKey: Uint8Array,
+  signerEd25519PkB64: Base64 | undefined,
+): boolean {
+  if (!signatureB64 || !signerEd25519PkB64) return false;
+  return verify(
+    signatureB64,
+    epochCommitmentMessage(groupId, epoch, groupKeyDigest(groupKey)),
+    signerEd25519PkB64,
   );
 }
 

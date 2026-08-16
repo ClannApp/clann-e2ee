@@ -20,22 +20,24 @@ prefer not to be named, that is fine too.
 ## Scope
 
 **In scope** — anything in this repository: the CLN1 envelope, the sealed-box
-construction, the identity and attestation logic, the group key exchange, and
-the recovery derivation. Also in scope: any place where the code does not
-deliver a property [PROTOCOL.md](PROTOCOL.md) specifies.
+construction, the identity and attestation logic, the group key exchange, the
+epoch commitments that authenticate it, and the recovery derivation. Also in
+scope: any place where the code does not deliver a property
+[PROTOCOL.md](PROTOCOL.md) specifies.
+
+A group key that a client will adopt without a valid commitment from a trusted
+device ([§6.6](PROTOCOL.md#66-epoch-commitments-where-a-group-key-came-from)) is
+the highest-value finding in this repository.
 
 **Known already** — please still report these if you have something new, but we
 are aware of them and they are documented in
 [PROTOCOL.md §9](PROTOCOL.md#9-scope-boundaries) and
 [§2.3](PROTOCOL.md#23-outside-the-schemes-scope):
 
-- Group keys are adopted with no provenance check, so a malicious server can
-  inject an epoch key and read everything encrypted under it
-  ([§9.2](PROTOCOL.md#92-group-keys-are-adopted-without-provenance)). Known,
-  not yet fixed.
-- Grant-time trust propagates into the attestation chain, so the chain does not
-  by itself prevent server key injection
-  ([§9.3](PROTOCOL.md#93-grant-time-trust-propagates-into-the-chain)).
+- Grant-time trust propagates into the attestation chain, so a device admitted
+  by a bad human approval is treated as trusted from then on — including for the
+  epoch commitments it signs
+  ([§9.2](PROTOCOL.md#92-grant-time-trust-propagates-into-the-chain)).
 - Metadata is not encrypted (captions, comments, membership, timing, sizes).
 - Client-side rather than server-side wrap verification.
 - No forward secrecy within a group.

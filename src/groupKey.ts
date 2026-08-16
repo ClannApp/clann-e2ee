@@ -31,15 +31,23 @@
  * application's responsibility, and PROTOCOL.md §6.1 states the obligation
  * precisely.
  *
- * Note the asymmetry, because it is the sharpest thing to know about this file:
- * the outbound path verifies recipients carefully, while the inbound path
- * ({@link openGroupKey}) adopts a key with no provenance check at all. Sealed
- * boxes are anonymous, so a successful open says only "this was sealed to me",
- * never "a member sealed this". PROTOCOL.md §9.2.
+ * Both directions are verified, and it is worth knowing why each needs its own
+ * mechanism. Outbound, the question is *who may receive* this key, answered by
+ * the device trust graph (§5). Inbound, the question is *who produced* it —
+ * which the trust graph cannot answer, because a sealed box is anonymous and a
+ * successful open says only "this was sealed to me". That gap is closed by an
+ * epoch commitment: the minting device signs the key it minted, and adopters
+ * refuse a key whose signer they do not already trust. PROTOCOL.md §6.6.
  */
 
 import { seal, sealOpen } from './sealedBox';
-import { computeTrustedDevices, pinOwnDevice, verifyDeviceBinding } from './identity';
+import {
+  computeTrustedDevices,
+  pinOwnDevice,
+  signEpochCommitment,
+  verifyDeviceBinding,
+  verifyEpochCommitment,
+} from './identity';
 import { bytesToBase64, base64ToBytes } from './bytes';
 import { draw, type RandomSource } from './random';
 import type {
@@ -48,6 +56,7 @@ import type {
   DeviceKeypair,
   DevicePublicKeys,
   DeviceRecord,
+  EpochCommitment,
   EpochWrappedGroupKey,
   WrappedGroupKey,
 } from './types';
@@ -76,7 +85,7 @@ const EPHEMERAL_SEED_SIZE = 32;
  *   Know its ceiling: it blocks devices nobody has vouched for, but does not
  *   revisit devices somebody already did. Since a grant attests its recipient
  *   on a self-signature alone, a device admitted once is chain-verified from
- *   then on. See PROTOCOL.md §9.3.
+ *   then on. See PROTOCOL.md §9.2.
  */
 export type FanoutPolicy = 'self-signature' | 'attestation-chain';
 
@@ -116,34 +125,171 @@ export function sealGroupKeyTo(
   );
 }
 
+/** How a key failed to prove where it came from. Diagnostics only. */
+export type EpochProvenanceFailure =
+  | 'missing'
+  | 'mismatched-epoch'
+  | 'mismatched-group'
+  | 'bad-signature'
+  | 'untrusted-signer';
+
 /**
- * Open a group key sealed to this device. Throws if it was not ours to open.
+ * Thrown when a group key opened correctly but cannot be shown to have been
+ * minted inside the group.
  *
- * **This authenticates nothing about where the key came from.** A sealed box is
- * anonymous: it proves the contents were not altered after sealing, not who did
- * the sealing. Any party holding this device's X25519 public key — including the
- * server, which stores and serves it — can construct a blob this opens. Callers
- * must not treat a successful open as evidence that a member device minted the
- * key. See PROTOCOL.md §9.2 for the consequence and the signed-commitment fix.
+ * Deliberately distinct from a failed unseal. A blob that will not open is
+ * usually a bookkeeping problem — the wrong device's copy, a botched migration.
+ * A blob that opens but carries no trustworthy provenance is the shape of an
+ * actual attack, and the two must not be handled by the same catch.
+ *
+ * `reason` is for diagnostics and support, not for control flow. Every value
+ * means the same thing operationally: this key must not be adopted.
+ */
+export class EpochProvenanceError extends Error {
+  readonly epoch: number;
+  readonly reason: EpochProvenanceFailure;
+  constructor(epoch: number, reason: EpochProvenanceFailure, detail: string) {
+    super(`refusing to adopt the group key for epoch ${epoch}: ${detail}`);
+    this.name = 'EpochProvenanceError';
+    this.epoch = epoch;
+    this.reason = reason;
+  }
+}
+
+/**
+ * What a device needs in order to judge where a group key came from.
+ *
+ * This is the same material a fan-out verifies recipients against, and for the
+ * same reason: deciding whether to believe the signer of an epoch is exactly
+ * the question of whether that device is in the group's trust graph.
+ *
+ * One obligation follows from `devices` that is easy to miss. An epoch minted
+ * years ago may have been minted by a device since removed or replaced, and its
+ * signature must still verify — so this set has to include the historical
+ * devices that signed the epochs being opened, not merely current membership. A
+ * host that serves only current devices will find old epochs stop opening after
+ * a member leaves, which is a data-loss bug rather than a security one.
+ * PROTOCOL.md §10.
+ */
+export interface EpochTrustContext {
+  /** The group whose key this is. Checked against the commitment. */
+  groupId: string;
+  /** Every device that could legitimately have signed an epoch, past or present. */
+  devices: DeviceRecord[];
+  attestations?: AttestationRecord[];
+  /** Trust roots: typically this device, plus the founder verified through genesis. */
+  rootDeviceIds: string[];
+}
+
+/**
+ * Check that a commitment shows this key was minted inside the group.
+ *
+ * The order is load-bearing. Epoch and group are checked before the signature,
+ * so a commitment lifted from another epoch or another group is rejected as the
+ * replay it is, rather than passing a signature check it would genuinely
+ * satisfy. The signer's trust is then checked separately from the signature's
+ * validity, because a perfectly valid signature from a device nobody has
+ * vouched for is precisely what a server injecting a key would produce.
+ */
+function assertEpochProvenance(
+  groupKey: Uint8Array,
+  epoch: number,
+  commitment: EpochCommitment | undefined,
+  ctx: EpochTrustContext,
+): void {
+  if (!commitment?.signature || !commitment.signer_device_id) {
+    throw new EpochProvenanceError(epoch, 'missing', 'it carries no signed commitment');
+  }
+  if (commitment.epoch !== epoch) {
+    throw new EpochProvenanceError(
+      epoch,
+      'mismatched-epoch',
+      `the commitment covers epoch ${commitment.epoch}`,
+    );
+  }
+  if (commitment.group_id !== ctx.groupId) {
+    throw new EpochProvenanceError(
+      epoch,
+      'mismatched-group',
+      `the commitment covers group ${commitment.group_id}, not ${ctx.groupId}`,
+    );
+  }
+  if (ctx.rootDeviceIds.length === 0) {
+    // As in the fan-out: an empty root set trusts nothing, so this would fail
+    // anyway — but as a misconfiguration, and it must not read like an attack.
+    throw new Error('groupKey: adopting a group key requires at least one trust root');
+  }
+
+  const signer = ctx.devices.find((d) => d.id === commitment.signer_device_id);
+  const signatureOk =
+    !!signer &&
+    verifyEpochCommitment(
+      commitment.signature,
+      commitment.group_id,
+      commitment.epoch,
+      groupKey,
+      signer.ed25519_public_key,
+    );
+  if (!signatureOk) {
+    throw new EpochProvenanceError(
+      epoch,
+      'bad-signature',
+      `no valid signature from device ${commitment.signer_device_id}`,
+    );
+  }
+
+  const trusted = computeTrustedDevices(ctx.devices, ctx.attestations ?? [], ctx.rootDeviceIds);
+  if (!trusted.has(signer.id)) {
+    throw new EpochProvenanceError(
+      epoch,
+      'untrusted-signer',
+      `device ${signer.id} signed it, and no trusted device vouches for that one`,
+    );
+  }
+}
+
+/**
+ * Open and adopt a group key sealed to this device.
+ *
+ * Two independent things must hold, and both are enforced. The blob must open,
+ * which proves it was sealed to this device; and the commitment must show that
+ * a *trusted member device* minted the key. The first without the second is
+ * worth nothing — any party holding this device's X25519 public key, the server
+ * included, can seal a key of its own choosing that opens perfectly well.
+ *
+ * Throws {@link EpochProvenanceError} if provenance fails, after a successful
+ * unseal. There is no "adopt anyway" path: catching this and proceeding hands
+ * the group to whoever produced the key.
  */
 export function openGroupKey(
   wrappedKeyB64: Base64,
   kp: Pick<DeviceKeypair, 'publicKey' | 'secretKey'>,
+  epoch: number,
+  commitment: EpochCommitment | undefined,
+  ctx: EpochTrustContext,
 ): Uint8Array {
-  return sealOpen(base64ToBytes(wrappedKeyB64), kp.publicKey, kp.secretKey);
+  const groupKey = sealOpen(base64ToBytes(wrappedKeyB64), kp.publicKey, kp.secretKey);
+  assertEpochProvenance(groupKey, epoch, commitment, ctx);
+  return groupKey;
 }
 
 export interface FanoutRequest<T extends DeviceRecord> {
   /** The key being distributed. Callers mint it with {@link generateGroupKey}. */
   groupKey: Uint8Array;
+  /** The group this key belongs to. Bound into the epoch commitment. */
+  groupId: string;
+  /** The epoch this key becomes. Bound into the epoch commitment. */
+  epoch: number;
   /** The group's member device set, as reported by the server. */
   devices: T[];
   /** Attestations over those devices. Required by `attestation-chain`. */
   attestations?: AttestationRecord[];
-  /** This install's device id, or null if it has not registered yet. */
-  ownDeviceId: string | null;
+  /** This install's device id. Required: an epoch is signed by the device minting it. */
+  ownDeviceId: string;
   /** This install's own public keys, read from local storage — never from the server. */
   ownPublicKeys: DevicePublicKeys;
+  /** This install's Ed25519 secret key, used to sign the epoch commitment. */
+  ownEdSecretKey: Uint8Array;
   /** Trust roots for `attestation-chain`: typically this device, plus the verified founder. */
   rootDeviceIds?: string[];
   policy: FanoutPolicy;
@@ -155,6 +301,12 @@ export interface FanoutResult<T extends DeviceRecord> {
   devices: T[];
   /** One sealed copy of the group key per recipient, ready to send. */
   wrappedKeys: WrappedGroupKey[];
+  /**
+   * This device's signature over the key it just minted. Must be stored with
+   * the epoch and served alongside every wrapped copy — without it, no
+   * recipient can adopt the key.
+   */
+  commitment: EpochCommitment;
 }
 
 /**
@@ -170,6 +322,8 @@ export interface FanoutResult<T extends DeviceRecord> {
  *     the attack against itself. Pinning first turns that into a hard failure.
  *  2. **Verify every recipient**, to the requested policy.
  *  3. **Seal only then**, and only to keys that survived both.
+ *  4. **Sign the epoch**, so recipients can tell this key came from a member
+ *     device rather than from the server (§6.6).
  *
  * Throws {@link OwnDeviceKeyMismatchError} at step 1 or
  * {@link UnverifiedDevicesError} at step 2; on either, nothing is sealed and
@@ -183,6 +337,14 @@ export function prepareGroupKeyFanout<T extends DeviceRecord>(
   }
   if (req.devices.length === 0) {
     throw new Error('groupKey: refusing to distribute a key to an empty device set');
+  }
+  if (!req.ownDeviceId) {
+    // An unregistered device has no published identity, so nothing it signed
+    // could be verified by anyone. It cannot mint an epoch — register first.
+    throw new Error('groupKey: minting an epoch requires a registered own device id');
+  }
+  if (!Number.isInteger(req.epoch) || req.epoch < 0) {
+    throw new Error(`groupKey: epoch must be a non-negative integer, got ${req.epoch}`);
   }
 
   // 1. Pin — see the note above on why this precedes verification.
@@ -213,7 +375,16 @@ export function prepareGroupKeyFanout<T extends DeviceRecord>(
     wrapped_key: sealGroupKeyTo(req.groupKey, d.x25519_public_key, req.random),
   }));
 
-  return { devices, wrappedKeys };
+  // 4. Sign. One commitment for the epoch, not one per recipient: it covers the
+  // key itself, so it stays valid however many times the key is later re-sealed.
+  const commitment: EpochCommitment = {
+    group_id: req.groupId,
+    epoch: req.epoch,
+    signer_device_id: req.ownDeviceId,
+    signature: signEpochCommitment(req.ownEdSecretKey, req.groupId, req.epoch, req.groupKey),
+  };
+
+  return { devices, wrappedKeys, commitment };
 }
 
 /** A device asking to be let into a group, as the granting device sees it. */
@@ -253,44 +424,71 @@ export function verifyGrantRecipient(recipient: GrantRecipient): boolean {
  * group's history rather than only its future, and the recipient was verified
  * by {@link verifyGrantRecipient} — a self-signature, not proof of ownership.
  * The human approval preceding this call is the real boundary; an out-of-band
- * safety-code comparison is what strengthens it. PROTOCOL.md §9.3.
+ * safety-code comparison is what strengthens it. PROTOCOL.md §9.2.
  */
 export function sealEpochsToRequester(
-  epochs: Array<{ epoch: number; key: Uint8Array }>,
+  epochs: Array<{ epoch: number; key: Uint8Array; commitment: EpochCommitment }>,
   requesterPublicKeyB64: Base64,
   random: RandomSource,
 ): EpochWrappedGroupKey[] {
   if (epochs.length === 0) {
     throw new Error('groupKey: this device holds no keys for the group');
   }
-  return epochs.map(({ epoch, key }) => ({
-    epoch,
-    wrapped_key: sealGroupKeyTo(key, requesterPublicKeyB64, random),
-  }));
+  return epochs.map(({ epoch, key, commitment }) => {
+    // The original minter's commitment travels with the key rather than being
+    // reissued here. This device did not mint these epochs and must not claim
+    // to have: re-signing would make every grant look like a fresh mint, and
+    // the recipient would lose the ability to see who actually produced a key.
+    if (!commitment || commitment.epoch !== epoch) {
+      throw new Error(`groupKey: epoch ${epoch} has no matching commitment to pass on`);
+    }
+    return {
+      epoch,
+      wrapped_key: sealGroupKeyTo(key, requesterPublicKeyB64, random),
+      commitment,
+    };
+  });
 }
 
 /**
  * Open a batch of epoch-wrapped keys addressed to this device.
  *
- * Blobs that fail to open are reported rather than thrown on, because a single
- * bad wrap must not cost a device the epochs it *can* read. A bad wrap is a
- * real possibility here and worth understanding: the server cannot verify that
- * a wrap decrypts (it holds no keys), so a buggy or malicious member client can
- * store a blob that opens to nothing. That is an availability problem, not a
- * confidentiality one — see PROTOCOL.md §9.1.
+ * Blobs that fail are reported rather than thrown on, because a single bad wrap
+ * must not cost a device the epochs it *can* read. A bad wrap is a real
+ * possibility: the server cannot verify that a wrap decrypts (it holds no
+ * keys), so a buggy or malicious member client can store a blob that opens to
+ * nothing. That is an availability problem, not a confidentiality one — see
+ * PROTOCOL.md §9.1.
+ *
+ * Provenance failures are kept separate from unseal failures, because they mean
+ * very different things. `failed` is the ordinary degradation above. `rejected`
+ * is an epoch whose key opened but could not be shown to come from a trusted
+ * member device, which is the signature of key injection and is worth
+ * surfacing rather than retrying. Neither ends up in `opened`.
  */
 export function openEpochKeys(
   wrapped: EpochWrappedGroupKey[],
   kp: Pick<DeviceKeypair, 'publicKey' | 'secretKey'>,
-): { opened: Array<{ epoch: number; key: Uint8Array }>; failed: number[] } {
-  const opened: Array<{ epoch: number; key: Uint8Array }> = [];
+  ctx: EpochTrustContext,
+): {
+  opened: Array<{ epoch: number; key: Uint8Array; commitment: EpochCommitment }>;
+  failed: number[];
+  rejected: Array<{ epoch: number; reason: EpochProvenanceFailure }>;
+} {
+  const opened: Array<{ epoch: number; key: Uint8Array; commitment: EpochCommitment }> = [];
   const failed: number[] = [];
+  const rejected: Array<{ epoch: number; reason: EpochProvenanceFailure }> = [];
   for (const w of wrapped) {
     try {
-      opened.push({ epoch: w.epoch, key: openGroupKey(w.wrapped_key, kp) });
-    } catch {
-      failed.push(w.epoch);
+      const key = openGroupKey(w.wrapped_key, kp, w.epoch, w.commitment, ctx);
+      opened.push({ epoch: w.epoch, key, commitment: w.commitment });
+    } catch (err) {
+      if (err instanceof EpochProvenanceError) {
+        rejected.push({ epoch: w.epoch, reason: err.reason });
+      } else {
+        failed.push(w.epoch);
+      }
     }
   }
-  return { opened, failed };
+  return { opened, failed, rejected };
 }

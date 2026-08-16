@@ -22,9 +22,11 @@ lines of dependency-light TypeScript:
   primitives.
 - **Signed device identities** — Ed25519 self-signatures, attestation chains,
   and a founder-signed trust root, which together are what stops a malicious
-  server from substituting keys during distribution.
+  server from substituting a *device's* keys during distribution.
 - **Group key exchange** — epoch-versioned group keys, fan-out with an explicit
-  verification policy, and rotation that excludes removed members.
+  verification policy, rotation that excludes removed members, and signed epoch
+  commitments so a client can tell a key minted by a member device from one the
+  server made up.
 - **Recovery** — a BIP39 phrase that derives a virtual device, so a locked-out
   user can let their own new phone in.
 
@@ -86,17 +88,24 @@ const photoBytes = cln1.decrypt(dek, ciphertext);
 ```ts
 const gk = groupKey.generateGroupKey(random);
 
-const { wrappedKeys } = groupKey.prepareGroupKeyFanout({
+const { wrappedKeys, commitment } = groupKey.prepareGroupKeyFanout({
   groupKey: gk,
+  groupId,             // bound into the commitment, with the epoch
+  epoch: latestEpoch + 1,
   devices,             // the group's member devices, from your server
   attestations,        // who has vouched for whom
   ownDeviceId,         // this install
   ownPublicKeys,       // read from LOCAL storage, never from the server
+  ownEdSecretKey,      // signs the epoch commitment
   rootDeviceIds: [ownDeviceId, verifiedFounderDeviceId],
   policy: 'attestation-chain',
   random,
 });
 ```
+
+Store `commitment` with the epoch and serve it beside every wrapped copy. It is
+this device's signature over the key it just minted, and without it no recipient
+can adopt the key.
 
 The `policy` argument is the interesting one, and it is explicit because a
 fan-out that picked its own verification strength would be impossible to audit
@@ -113,6 +122,26 @@ Verification failures throw. `UnverifiedDevicesError`,
 `OwnDeviceKeyMismatchError` and `GenesisVerificationError` are all fail-closed;
 there is no "seal anyway" path, and catching one to proceed defeats the scheme.
 
+### Adopt one
+
+Opening a group key is two checks, not one. The blob must open — which proves it
+was sealed to this device — and the commitment must show a trusted member device
+minted it. The first without the second is worth nothing: the server holds your
+public key, so it can seal a key of its own that opens perfectly well.
+
+```ts
+const gk = groupKey.openGroupKey(wrappedKey, ownKeypair, epoch, commitment, {
+  groupId,
+  devices,             // including devices that signed OLD epochs, even if they left
+  attestations,
+  rootDeviceIds: [ownDeviceId, verifiedFounderDeviceId],
+});
+```
+
+`EpochProvenanceError` means the key opened but could not be shown to come from
+inside the group. That is the shape of key injection, and there is no path past
+it — see [§6.6](PROTOCOL.md#66-epoch-commitments-where-a-group-key-came-from).
+
 ## API
 
 | Module | What it covers | Spec |
@@ -122,7 +151,7 @@ there is no "seal anyway" path, and catching one to proceed defeats the scheme.
 | `sealedBox` | anonymous public-key sealing | [§3.1](PROTOCOL.md#31-primitives) |
 | `deviceKeys` | device keypairs, safety codes | [§3.1](PROTOCOL.md#31-primitives), [§5.4](PROTOCOL.md#54-safety-codes) |
 | `identity` | signatures, attestations, genesis, the trust graph | [§5](PROTOCOL.md#5-device-identity-and-trust) |
-| `groupKey` | who gets the group key, verified how | [§6](PROTOCOL.md#6-group-key-exchange) |
+| `groupKey` | who gets the group key, verified how, and where it came from | [§6](PROTOCOL.md#6-group-key-exchange), [§6.6](PROTOCOL.md#66-epoch-commitments-where-a-group-key-came-from) |
 | `recovery` | phrase-derived virtual device | [§7.2](PROTOCOL.md#72-recovery-phrase--a-virtual-device) |
 
 ## Tests
@@ -136,8 +165,10 @@ reproduced byte-for-byte here — a round-trip test only proves a codec agrees
 with itself, which is the bug that matters least. The suite also asserts the
 negative properties directly: that truncation fails, that chunks cannot be
 spliced between files, that a server-minted device passes the `self-signature`
-policy and is refused by `attestation-chain`, and that a removed member cannot
-open a post-rotation epoch.
+policy and is refused by `attestation-chain`, that a removed member cannot open
+a post-rotation epoch, and that a group key is refused unless a trusted device
+signed the epoch it claims to be — including when the server reuses a genuine
+commitment over a substituted key.
 
 ## Design decisions
 
@@ -155,7 +186,7 @@ Three choices a reviewer is most likely to ask about, answered up front:
   prevention where it is possible, detection where it is not
   ([§5.2](PROTOCOL.md#52-the-scope-of-a-self-signature)). Because a grant
   attests its recipient, the attestation chain inherits that decision
-  ([§9.2](PROTOCOL.md#93-grant-time-trust-propagates-into-the-chain)).
+  ([§9.2](PROTOCOL.md#92-grant-time-trust-propagates-into-the-chain)).
 
 ## Licence
 

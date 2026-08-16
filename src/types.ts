@@ -55,6 +55,23 @@ export interface GroupGenesis {
   genesis_signature?: Base64;
 }
 
+/**
+ * The minting device's signature over a group key, carried alongside it.
+ *
+ * One per epoch rather than one per recipient: it commits to the key, not to
+ * any particular sealing of it, so the same record travels with every copy and
+ * survives being re-sealed to a device admitted years later. `signature` is
+ * over `epochCommitmentMessage(group_id, epoch, sha256(key))`, and
+ * `signer_device_id` says whose Ed25519 identity to check it against — a claim
+ * the verifier resolves through the trust graph rather than believing.
+ */
+export interface EpochCommitment {
+  group_id: string;
+  epoch: number;
+  signer_device_id: string;
+  signature: Base64;
+}
+
 /** A group key sealed to one device, ready to hand to the server. */
 export interface WrappedGroupKey {
   device_id: string;
@@ -65,6 +82,8 @@ export interface WrappedGroupKey {
 export interface EpochWrappedGroupKey {
   epoch: number;
   wrapped_key: Base64;
+  /** Provenance for this epoch's key. Required to adopt it (§6.6). */
+  commitment: EpochCommitment;
 }
 
 /** An X25519 encryption keypair plus its Ed25519 identity keypair. */

@@ -39,13 +39,21 @@ export type {
   DeviceKeypair,
   DevicePublicKeys,
   DeviceRecord,
+  EpochCommitment,
   EpochWrappedGroupKey,
   GroupGenesis,
   WrappedGroupKey,
 } from './types';
 
 export { OwnDeviceKeyMismatchError, GenesisVerificationError } from './identity';
-export { UnverifiedDevicesError } from './groupKey';
+export { UnverifiedDevicesError, EpochProvenanceError } from './groupKey';
 export type { EncMeta } from './keyWrap';
 export type { Cln1Header } from './cln1';
-export type { FanoutPolicy, FanoutRequest, FanoutResult, GrantRecipient } from './groupKey';
+export type {
+  EpochProvenanceFailure,
+  EpochTrustContext,
+  FanoutPolicy,
+  FanoutRequest,
+  FanoutResult,
+  GrantRecipient,
+} from './groupKey';
