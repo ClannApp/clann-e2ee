@@ -11,6 +11,7 @@
     ".": "./dist/index.js",
     "./cln1": "./dist/cln1.js",
     "./sealedBox": "./dist/sealedBox.js",
+    "./sealedField": "./dist/sealedField.js",
     "./identity": "./dist/identity.js",
     "./groupKey": "./dist/groupKey.js",
     "./keyWrap": "./dist/keyWrap.js",

@@ -1,6 +1,6 @@
 # The Clann E2EE protocol
 
-**Version 1.1 · Status: shipped, in staged rollout · Last revised August 2026**
+**Version 1.2 · Status: shipped, in staged rollout · Last revised August 2026**
 
 This document specifies the end-to-end encryption scheme used by [Clann](https://getclann.com),
 a family photo-sharing app. It is normative: where the implementation in this
@@ -208,6 +208,50 @@ The two MUST agree; a reader SHOULD treat disagreement as corruption.
 
 A server can validate this record's *shape* and nothing else. It holds no key
 and can never determine whether the wrap opens. See §9.1.
+
+### 3.4 Sealed fields: short text under the group key
+
+Captions and comments are the exception to §3.3. They are encrypted with the
+group key **directly**, with no DEK indirection, because every argument for the
+indirection evaporates at forty bytes: rotation never has to rewrite a caption,
+since the epoch travels inside the envelope; there is no per-item sharing story
+for one comment; and the nonce budget is the same either way, because a group
+key that wraps one DEK per photo already accumulates records at the same rate.
+An envelope larger than its plaintext would be the only thing a DEK bought.
+
+The ciphertext is an ASCII envelope, stored in the same column the plaintext
+occupied:
+
+```
+clnf1.<key_epoch>.<base64 12-byte nonce>.<base64 ciphertext‖tag>
+```
+
+`clnf1` is the discriminator and version. The separator is `.`, which is absent
+from the base64 alphabet, so the split is unambiguous. Storing the envelope in
+the plaintext's own column is deliberate: a group part-way through converting
+its backlog holds both shapes side by side, and a reader tells them apart by
+the prefix rather than by a second column that would have to be kept in step.
+
+**AAD.** Each field is authenticated against the group and the field name:
+
+```
+clann-field-v1|<family group id>|<field>
+```
+
+where `<field>` is a stable name — `caption`, `comment` — and neither part may
+contain `|`. This binds a caption to one family and one kind of field: the
+server cannot present family A's caption as family B's, nor a caption as a
+comment. It does **not** bind the record id; see §9.5.
+
+**Padding.** Plaintext is prefixed with a 2-byte big-endian byte length and
+zero-padded to a multiple of 32 bytes before encryption, so "ok" and "lovely
+photo" are indistinguishable in size. Length is bucketed, not hidden — a long
+comment still looks longer than a short one. Fields longer than 65535 UTF-8
+bytes cannot be represented and MUST be rejected rather than truncated.
+
+Implementations MUST NOT fall back to displaying the raw stored value when an
+envelope fails to open. A reader that does will put ciphertext on screen the
+first time a rotation outruns a key sync.
 
 ---
 
@@ -723,19 +767,29 @@ what lets the recovery phrase self-serve.
 
 - Photo bytes — original, medium and thumbnail variants.
 - Video bytes and video poster images.
+- Voice notes: the audio is a CLN1 file like any other (§4).
+- Captions and comments, as sealed fields (§3.4).
 - EXIF and GPS data are **stripped client-side** for encrypted groups and never
   uploaded at all.
 
 **Not encrypted — visible to the server:**
 
-- Captions, comments and voice notes.
 - Group names, member names, avatars and the membership graph.
+- Who wrote which caption or comment, and when. Only the text is sealed; the
+  authorship and timing of every one of them is in the clear.
+- Reactions — which emoji a member put on which item.
+- Subject tags: which people and children appear in which item. These drive
+  server-side filtering ("photos of Aoife"), so encrypting them would move that
+  query onto the client; the trade is deliberate and unresolved.
 - Which groups and which items are encrypted; epoch numbers; upload times;
   ciphertext sizes; media type; image dimensions.
 - All device public keys, attestations, and the key-request graph — who asked to
   be let in, who approved, and when.
 - Push notification metadata. Encrypted groups lose push image previews
   entirely, because the operating system fetches those and cannot decrypt them.
+  For the same reason a comment's text cannot appear in a push body: the OS
+  renders that string and holds no key. Encrypted groups get a generic body and
+  the sealed text in the payload, which the app opens once it is running.
 - For groups that enabled encryption *after* uploading, any location and
   subject metadata attached to those older photos, unless separately purged.
 
@@ -748,6 +802,14 @@ Older photos in a group that switches on encryption stay plaintext until
 migrated. This is deliberate: encryption takes effect going forward
 immediately, and rewriting the backlog is a separate, optional operation that
 rewrites existing files and so requires every member to be keyed first.
+
+The same is true of text. Captions and comments written before a group was
+encrypted stay plaintext until a keyed member device seals them in place — the
+server cannot do it, holding no key. Until that sweep finishes, a group holds
+both shapes in the same columns, which is exactly what §3.4's prefix is for. A
+group whose members never open the app again keeps its old text in the clear
+indefinitely; there is no server-side path that would change that, and claims
+made about a family's history should account for it.
 
 ---
 
@@ -797,7 +859,8 @@ its future.
 
 ### 9.3 Metadata
 
-Covered in §8. Out of scope for this protocol.
+Covered in §8. What is left in the clear there — authorship, timing, reactions,
+subject tags, the membership graph — is out of scope for this protocol.
 
 ### 9.4 One wrapped key per item, per group
 
@@ -806,7 +869,21 @@ Sharing an encrypted item into a *second* encrypted group is therefore not
 possible without a device that belongs to both re-wrapping the DEK, and Clann
 currently blocks the operation rather than doing so.
 
-### 9.5 Rotation is performed by member devices
+### 9.5 Sealed fields bind to a group, not to a record
+
+A sealed field's AAD (§3.4) covers the family group and the field name, so a
+malicious server cannot move a caption into another family or replay it as a
+comment. It CANNOT stop that server moving a caption from one photo to another
+*within* the same group, or attaching a comment to a different photo.
+
+The reason is availability of the identifier, not oversight: photo and comment
+ids are minted server-side, after the client has already sealed the text.
+Binding to them would mean handing clients id generation, with the forgery
+surface that implies. The residual capability is the same class as reordering a
+feed — an integrity gap within a group whose members already trust each other,
+not a confidentiality break — and it is accepted on those terms.
+
+### 9.6 Rotation is performed by member devices
 
 The server cannot rotate, having no key. Rotation is carried out by the first
 member device that both holds the current epoch and has permission, so a group
@@ -814,7 +891,7 @@ continues on its existing epoch until such a device comes online. Removal of a
 member takes effect for new uploads from that point; the interval is a function
 of app usage rather than of the protocol.
 
-### 9.6 Server-side media operations require plaintext
+### 9.7 Server-side media operations require plaintext
 
 Operations that read pixels server-side — rotation, blur-on-the-fly, print
 fulfilment — are not available for encrypted groups, and the equivalent work is
@@ -856,6 +933,21 @@ and the scheme's security depends on all of them:
 9. **Grant all epochs.** Never a subset (§6.3).
 10. **Strip EXIF and location data client-side** before encrypting, if the
     claims in §8 are to hold.
+11. **Never render an unopened sealed field.** A field that fails to open is
+    `locked` or `unreadable`, never the raw stored value (§3.4). Two seams make
+    this easy to get wrong. A push notification body is rendered by the
+    operating system with no key available at all, so it must be generic for an
+    encrypted group. And a *mixed-version fleet* will contain clients that
+    decrypt media but not fields: a host MUST be able to tell those apart —
+    a boolean "supports E2EE" signal cannot — and MUST redact sealed text
+    server-side for the ones that cannot open it. There is no fallback to offer
+    them, because the plaintext no longer exists and the server holds no key.
+12. **Guard the write side of a backlog sweep.** Sealing a field that is already
+    sealed produces a doubly-wrapped value that opens to ciphertext. A host that
+    lets several devices sweep the same group concurrently MUST make the write
+    conditional on the stored value still being plaintext, and SHOULD reject a
+    replacement that is not envelope-shaped — otherwise a buggy client can write
+    plaintext back and the row will look converted forever.
 
 ---
 
@@ -892,6 +984,7 @@ Run it with `npm test`.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.2 | August 2026 | **Sealed fields (§3.4).** Captions, comments and voice notes are now inside the encryption boundary: short text is sealed directly under the group key as a `clnf1.` envelope stored in the plaintext's own column, and voice-note audio becomes an ordinary CLN1 file. §8 is rewritten accordingly, and is now explicit about what remains in the clear — authorship, timing, reactions and subject tags. New scope boundary §9.5 records that a sealed field binds to a group and a field name but not to a record id, with the reasoning; the later boundaries are renumbered. New host obligations 11 and 12 cover never rendering an unopened field — including server-side redaction for clients in a mixed-version fleet that decrypt media but not fields — and guarding concurrent backlog sweeps. Additive: no existing envelope, wrap or signature changes, and a reader that predates this version sees text it cannot interpret rather than text it misreads. |
 | 1.1 | August 2026 | **Epoch commitments (§6.6).** Group keys are now signed by the device that mints them and verified against the trust graph before adoption, closing the group-key injection gap that version 1 documented as a known weakness, for groups encrypted from this version onward; the remaining boundaries in §9 are renumbered accordingly. Breaking: `prepareGroupKeyFanout` requires `groupId`, `epoch` and `ownEdSecretKey` and returns the epoch's commitment; `openGroupKey` requires the commitment and a trust context; `openEpochKeys` is removed, since a batch open cannot verify what it adopts. Hosts must store commitments against the epoch and retain historical device records (§10). |
 | 1 | August 2026 | Initial public specification of the shipped scheme. |
 

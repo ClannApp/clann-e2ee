@@ -13,6 +13,7 @@
  *   deviceKeys  device keypairs and human-comparable fingerprints (§3.1, §5.4)
  *   identity    signatures, attestations, genesis, the trust graph (§5)
  *   groupKey    who gets the group key, verified how (§6)
+ *   sealedField short text sealed under a group key — captions, comments (§3.4)
  *   recovery    phrase-derived virtual device (§7.2)
  *
  * Everything here is pure: no I/O, no ambient randomness, no platform
@@ -30,6 +31,7 @@ export * as identity from './identity';
 export * as keyWrap from './keyWrap';
 export * as recovery from './recovery';
 export * as sealedBox from './sealedBox';
+export * as sealedField from './sealedField';
 
 export { draw, webCryptoRandom, type RandomSource } from './random';
 
@@ -48,6 +50,7 @@ export type {
 export { OwnDeviceKeyMismatchError, GenesisVerificationError } from './identity';
 export { UnverifiedDevicesError, EpochProvenanceError } from './groupKey';
 export type { EncMeta } from './keyWrap';
+export type { FieldContext, SealedField } from './sealedField';
 export type { Cln1Header } from './cln1';
 export type {
   EpochProvenanceFailure,
