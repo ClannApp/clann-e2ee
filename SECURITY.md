@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report security issues privately, by email to **security@getclann.com**,
+Please report security issues privately, by email to **support@getclann.com**,
 or through GitHub's private vulnerability reporting on this repository. Please
 do not open a public issue for anything you believe is exploitable.
 
