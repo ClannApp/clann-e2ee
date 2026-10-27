@@ -118,8 +118,10 @@ These are deliberate boundaries, discussed where they arise.
 - **First-contact identity.** A self-signature proves a record is internally
   consistent, not that it belongs to a particular person. Clann uses the same
   trust-on-first-use model as iMessage; §5.2.
-- **Metadata.** Captions, comments, filenames, timestamps, sizes, membership
-  and the key-request graph are server-visible. §8.
+- **Metadata.** Authorship, timestamps, filenames, sizes, reactions, subject
+  tags, membership and the key-request graph are server-visible. The text of
+  captions and comments is sealed (§3.4), but who wrote each one and when is
+  not. §8.
 - **Availability against a malicious member.** A member can upload an
   undecryptable key wrap. §9.1.
 - **A compromised member device**, as above.
