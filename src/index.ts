@@ -14,6 +14,7 @@
  *   identity    signatures, attestations, genesis, the trust graph (§5)
  *   groupKey    who gets the group key, verified how (§6)
  *   sealedField short text sealed under a group key — captions, comments (§3.4)
+ *   profileKey  per-person keys shared across groups — avatars (§3.5)
  *   recovery    phrase-derived virtual device (§7.2)
  *
  * Everything here is pure: no I/O, no ambient randomness, no platform
@@ -29,6 +30,7 @@ export * as deviceKeys from './deviceKeys';
 export * as groupKey from './groupKey';
 export * as identity from './identity';
 export * as keyWrap from './keyWrap';
+export * as profileKey from './profileKey';
 export * as recovery from './recovery';
 export * as sealedBox from './sealedBox';
 export * as sealedField from './sealedField';

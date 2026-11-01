@@ -15,6 +15,7 @@
     "./identity": "./dist/identity.js",
     "./groupKey": "./dist/groupKey.js",
     "./keyWrap": "./dist/keyWrap.js",
+    "./profileKey": "./dist/profileKey.js",
     "./deviceKeys": "./dist/deviceKeys.js",
     "./recovery": "./dist/recovery.js",
     "./bytes": "./dist/bytes.js",

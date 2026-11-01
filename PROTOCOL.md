@@ -1,6 +1,6 @@
 # The Clann E2EE protocol
 
-**Version 1.2 · Status: shipped, in staged rollout · Last revised August 2026**
+**Version 1.3 · Status: shipped, in staged rollout (§3.5 behind a flag) · Last revised November 2026**
 
 This document specifies the end-to-end encryption scheme used by [Clann](https://getclann.com),
 a family photo-sharing app. It is normative: where the implementation in this
@@ -254,6 +254,60 @@ bytes cannot be represented and MUST be rejected rather than truncated.
 Implementations MUST NOT fall back to displaying the raw stored value when an
 envelope fails to open. A reader that does will put ciphertext on screen the
 first time a rotation outruns a key sync.
+
+### 3.5 Profile keys: avatars, across groups
+
+Avatars break the assumption behind §3.3 that an item belongs to one group. A
+photo does; a person does not — a grandmother is in her own family's group and
+her daughter's, a child in their parents' group and their grandparents'. So a
+person gets one more key, shared with every group they are in:
+
+```
+Group key (GK)       per group, per epoch
+   │  AES-256-GCM(GK_epoch, PK)     AAD clann-profile-key-v1|<type>|<id>|<version>|<group id>
+   ▼
+Profile key (PK)     32 random bytes per person (user or child), versioned 1, 2, 3…
+   │  AES-256-GCM(PK_version, DEK)  AAD clann-avatar-v1|<type>|<id>|<version>
+   ▼
+Avatar DEK           32 random bytes per avatar upload
+   │  CLN1, media JPEG, header key epoch = PK version
+   ▼
+Avatar image
+```
+
+`<type>` is `user` or `child`; `<id>` the person's id; neither part may contain
+`|`. The avatar DEK wrap is an ordinary `enc_meta` record whose `key_epoch`
+names the **profile key version**, not a group epoch, so a host can store and
+shape-check it exactly like a photo's.
+
+**Distribution.** A profile key is wrapped once under the latest key of each
+encrypted group its person belongs to. Whoever creates the person's first
+encrypted avatar mints version 1 — the person themselves, or for a child a
+parent or a member of one of the child's groups — and wraps it into every such
+group they can. Any member who later holds both the profile key (through one
+group) and another group's key can wrap it into the second group. That single
+rule covers a member joining a group, a child being added to one, and a parent
+who approves a child joining a group they are not in themselves: whichever
+device next sees the gap fills it.
+
+**Binding.** Unlike a photo's DEK wrap (§3.3) or a sealed field (§9.5), both
+wraps here name the person they belong to. That is possible because person ids
+exist before anything is encrypted. It means a server cannot present one
+person's face as another's: a substituted wrap, or a substituted avatar record,
+fails to open, and a conforming reader shows the person's initials.
+
+**Changing an avatar** mints a new DEK under the same profile key; no wrap
+changes. **Removing a member** does not rotate profile keys. The removed member
+keeps the profile keys they held, which reveals nothing they had not already
+seen — they lose the server access needed to fetch any later avatar, the same
+reasoning as §6.5. Versions exist so a profile key can be replaced without a
+format change; nothing replaces one today.
+
+**Plaintext groups.** A person in both an encrypted and a plaintext group has
+one avatar, and it is encrypted. Members of the plaintext group hold no group
+key and so cannot open it; they see initials. A host MUST NOT keep a plaintext
+copy for them — that copy would be the face, on the server, which is what this
+section exists to prevent.
 
 ---
 
@@ -771,12 +825,16 @@ what lets the recovery phrase self-serve.
 - Video bytes and video poster images.
 - Voice notes: the audio is a CLN1 file like any other (§4).
 - Captions and comments, as sealed fields (§3.4).
+- Avatars of users and children who are in at least one encrypted group (§3.5).
 - EXIF and GPS data are **stripped client-side** for encrypted groups and never
   uploaded at all.
 
 **Not encrypted — visible to the server:**
 
-- Group names, member names, avatars and the membership graph.
+- Group names, member and child names, and the membership graph.
+- Avatars of people who are in no encrypted group, and avatars not yet
+  re-encrypted by their owner's device (below).
+- Which people have an encrypted avatar, when it last changed, and its size.
 - Who wrote which caption or comment, and when. Only the text is sealed; the
   authorship and timing of every one of them is in the clear.
 - Reactions — which emoji a member put on which item.
@@ -812,6 +870,11 @@ both shapes in the same columns, which is exactly what §3.4's prefix is for. A
 group whose members never open the app again keeps its old text in the clear
 indefinitely; there is no server-side path that would change that, and claims
 made about a family's history should account for it.
+
+Avatars follow the same rule. An avatar set before its person joined an
+encrypted group stays plaintext until a device that may change it — the person's
+own, or a child's parent's — re-encrypts it, at which point the plaintext object
+is deleted. Someone who never opens the app keeps a plaintext avatar.
 
 ---
 
@@ -900,6 +963,17 @@ fulfilment — are not available for encrypted groups, and the equivalent work i
 done on the client. This is a functional consequence of the design rather than a
 security one, noted here so implementers plan for it.
 
+### 9.8 A profile key outlives membership, and an avatar can be rolled back
+
+Two consequences of §3.5 are accepted rather than solved. First, a member
+removed from every group a person is in keeps that person's profile key; if
+they later obtained the ciphertext of a newer avatar by some other route, they
+could open it. The server no longer serves it to them, and the face they would
+see is one they could have seen anyway. Second, a malicious server can serve a
+person's *older* avatar in place of the current one: both are bound to the same
+person and profile key, so both open. That is an integrity gap of the same class
+as §9.5 — stale content, never someone else's — and is accepted on those terms.
+
 ---
 
 ## 10. Obligations of a host application
@@ -950,6 +1024,13 @@ and the scheme's security depends on all of them:
     conditional on the stored value still being plaintext, and SHOULD reject a
     replacement that is not envelope-shaped — otherwise a buggy client can write
     plaintext back and the row will look converted forever.
+13. **Never hand out an encrypted avatar's location, and never keep a plaintext
+    one.** Responses that carry avatar URLs reach readers who can never hold a
+    key — public join pages, invitations, push images, old app versions. A host
+    MUST return nothing for an encrypted avatar there (the reader shows
+    initials), serve the ciphertext only to readers who share an encrypted group
+    with its person, refuse plaintext avatar uploads for a person in an
+    encrypted group, and delete the object an encrypted avatar replaces.
 
 ---
 
@@ -986,6 +1067,7 @@ Run it with `npm test`.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.3 | November 2026 | **Profile keys and encrypted avatars (§3.5).** Each user and child gets a profile key, wrapped under the key of every encrypted group they are in; avatars are CLN1 files whose DEK is wrapped under it. Both wraps are bound to the person in their AAD, so a server cannot substitute one person's face for another's. §8 moves avatars inside the boundary for people in an encrypted group and lists what stays visible. New scope boundary §9.8 (profile keys outlive membership; avatars can be rolled back) and host obligation 13. Additive: no existing envelope, wrap or signature changes. |
 | 1.2 | August 2026 | **Sealed fields (§3.4).** Captions, comments and voice notes are now inside the encryption boundary: short text is sealed directly under the group key as a `clnf1.` envelope stored in the plaintext's own column, and voice-note audio becomes an ordinary CLN1 file. §8 is rewritten accordingly, and is now explicit about what remains in the clear — authorship, timing, reactions and subject tags. New scope boundary §9.5 records that a sealed field binds to a group and a field name but not to a record id, with the reasoning; the later boundaries are renumbered. New host obligations 11 and 12 cover never rendering an unopened field — including server-side redaction for clients in a mixed-version fleet that decrypt media but not fields — and guarding concurrent backlog sweeps. Additive: no existing envelope, wrap or signature changes, and a reader that predates this version sees text it cannot interpret rather than text it misreads. |
 | 1.1 | August 2026 | **Epoch commitments (§6.6).** Group keys are now signed by the device that mints them and verified against the trust graph before adoption, closing the group-key injection gap that version 1 documented as a known weakness, for groups encrypted from this version onward; the remaining boundaries in §9 are renumbered accordingly. Breaking: `prepareGroupKeyFanout` requires `groupId`, `epoch` and `ownEdSecretKey` and returns the epoch's commitment; `openGroupKey` requires the commitment and a trust context; `openEpochKeys` is removed, since a batch open cannot verify what it adopts. Hosts must store commitments against the epoch and retain historical device records (§10). |
 | 1 | August 2026 | Initial public specification of the shipped scheme. |
