@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- This line is why the page can't send your file or key anywhere. default-src
+     'none' blocks every request a page can make: fetch, images, scripts, beacons,
+     sockets and form posts. Only inline code runs, and blob: is for showing what
+     you opened. A policy like this can't stop a page navigating away, so check
+     that the two scripts below never do. Or just disconnect from the network. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob:; media-src blob:; base-uri 'none'; form-action 'none'">
+<title>Clann E2EE Inspector</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --text: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --panel: #f5f5f7;
+    --pass: #1a7f37; --fail: #c62828; --warn: #9a6700; --tint: #0a66c2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111113; --text: #f5f5f7; --muted: #a1a1a6; --line: #3a3a3c; --panel: #1c1c1e;
+      --pass: #4ac26b; --fail: #ff6b6b; --warn: #d4a72c; --tint: #6cb6ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto; max-width: 680px; padding: 32px 16px 64px;
+    background: var(--bg); color: var(--text);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; }
+  h2 { font-size: 18px; margin: 32px 0 8px; }
+  p { margin: 0 0 12px; }
+  code, input[type=password], dd.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { font-size: 14px; overflow-wrap: anywhere; }
+  label { display: block; font-weight: 600; margin: 16px 0 4px; }
+  .hint { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+  input[type=file], input[type=password] { width: 100%; font-size: 15px; }
+  input[type=password] { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); }
+  button, .button {
+    display: inline-block; margin-top: 16px; padding: 10px 18px; border: 0; border-radius: 8px;
+    background: var(--tint); color: var(--bg); font: inherit; font-weight: 600; text-decoration: none; cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 12px 0; font-size: 14px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .result { margin-top: 16px; padding: 16px; border-radius: 10px; background: var(--panel); border-left: 4px solid var(--line); }
+  .result h3 { font-size: 17px; margin: 0 0 6px; }
+  .result.pass { border-left-color: var(--pass); }
+  .result.fail { border-left-color: var(--fail); }
+  .result.warn { border-left-color: var(--warn); }
+  .result p:last-child { margin-bottom: 0; }
+  .limits { margin-top: 16px; font-size: 14px; }
+  img, video { display: block; max-width: 100%; max-height: 480px; margin-top: 12px; border-radius: 8px; }
+  ul { margin: 8px 0 0; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  details { margin-top: 32px; border-top: 1px solid var(--line); padding-top: 12px; }
+  summary { font-weight: 600; cursor: pointer; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<h1>Clann E2EE Inspector</h1>
+<p>Opens a Clann encrypted file on this computer using only your browser's built-in crypto. This is one file with no libraries, and its security policy blocks network requests, so you can read the source and run it offline.</p>
+<p class="hint" id="no-crypto" hidden>This browser isn't offering WebCrypto here, so nothing below will work. Try a current version of Chrome, Firefox or Safari.</p>
+
+<label for="file">Encrypted file</label>
+<input type="file" id="file">
+<p class="hint">Ideally one you got yourself, by capturing the upload or download. The format is CLN1, described in PROTOCOL.md.</p>
+<div id="facts"></div>
+
+<label for="key">Media key</label>
+<!-- Masked: a pass is what people screenshot and share, and this is a secret. -->
+<input type="password" id="key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="64 hex characters">
+<p class="hint">In the app, open the photo, tap Encrypted, then Get this memory's key. It's a secret: anyone with the key and the file can open this memory in every stored size. This page doesn't save or send it.</p>
+<button type="button" id="check" disabled>Check file</button>
+
+<div id="result" aria-live="polite"></div>
+
+<details>
+  <summary>Make a test photo</summary>
+  <p class="hint">Upload this instead of a family photo. Its random ID lets you match the original, the stored file and the recovered image, even after the app re-encodes it.</p>
+  <button type="button" id="make-test">Make test photo</button>
+  <div id="test-photo"></div>
+</details>
+
+<details>
+  <summary>Try the samples</summary>
+  <p class="hint">In the <code>samples</code> folder next to this page. They use this public key, which protects nothing:</p>
+  <p><code>7557e96eb4cb9265d07f285b0f850957cec7c9ed238ae4a402ff004074232608</code></p>
+  <ul class="hint">
+    <li><code>sample-photo.cln1</code> and <code>sample-chunked.cln1</code> should pass.</li>
+    <li><code>sample-tampered.cln1</code> has one byte changed and should fail.</li>
+    <li><code>sample-truncated.cln1</code> has its last chunk removed and should fail.</li>
+    <li><code>sample-photo.jpg</code> isn't encrypted, and should be reported as a plain JPEG.</li>
+  </ul>
+</details>
+
+<script id="cln1-core">
+// The CLN1 format, written from PROTOCOL.md section 4 against WebCrypto alone. It
+// shares no code with @clann/e2ee, so a bug there can't hide here. The published
+// test vectors run through this script in test/inspector.test.ts.
+const CLN1 = (() => {
+  const HEADER_SIZE = 32;
+  const TAG_SIZE = 16;
+  const LAST_CHUNK = 0x80000000;
+  const MAX_CHUNK_SIZE = 64 * 1024 * 1024;
+  const MEDIA = {
+    1: { name: 'JPEG', noun: 'Photo', mime: 'image/jpeg' },
+    2: { name: 'MP4', noun: 'Video', mime: 'video/mp4' },
+  };
+
+  const toHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+
+  function parseKey(text) {
+    const hex = text.replace(/\s+/g, '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error('A media key is 64 hex characters.');
+    return Uint8Array.from(hex.match(/../g), (pair) => parseInt(pair, 16));
+  }
+
+  function parseHeader(file) {
+    if (file.length < HEADER_SIZE) throw new Error(`Too short: a CLN1 header is ${HEADER_SIZE} bytes.`);
+    if (String.fromCharCode(...file.subarray(0, 4)) !== 'CLN1') throw new Error('The first four bytes are not "CLN1".');
+    const view = new DataView(file.buffer, file.byteOffset, HEADER_SIZE);
+    const header = {
+      version: file[4],
+      alg: file[5],
+      media: file[6],
+      chunkSize: view.getUint32(8),
+      keyEpoch: view.getUint32(12),
+      noncePrefix: file.slice(16, 24),
+      fileId: file.slice(24, 32),
+    };
+    if (header.version !== 1) throw new Error(`Unsupported version ${header.version}.`);
+    if (header.alg !== 1) throw new Error(`Unsupported algorithm ${header.alg}.`);
+    if (!MEDIA[header.media]) throw new Error(`Unsupported media type ${header.media}.`);
+    if (header.chunkSize === 0 || header.chunkSize > MAX_CHUNK_SIZE) throw new Error(`Implausible chunk size ${header.chunkSize}.`);
+    if (header.keyEpoch === 0) throw new Error('The key epoch must be at least 1.');
+    return header;
+  }
+
+  function chunkCount(fileLength, chunkSize) {
+    return Math.ceil((fileLength - HEADER_SIZE) / (chunkSize + TAG_SIZE));
+  }
+
+  // nonce = nonce_prefix(8) || u32BE(counter | lastFlag<<31). The flag is what
+  // makes a file cut at a chunk boundary fail instead of opening shorter.
+  function chunkNonce(prefix, index, last) {
+    const nonce = new Uint8Array(12);
+    nonce.set(prefix, 0);
+    new DataView(nonce.buffer).setUint32(8, last ? (index | LAST_CHUNK) >>> 0 : index);
+    return nonce;
+  }
+
+  // Throws an Error with `.chunk` set to the chunk that failed to authenticate.
+  async function open(file, rawKey, onChunk) {
+    const header = parseHeader(file);
+    const aad = file.subarray(0, HEADER_SIZE);
+    const sealedSize = header.chunkSize + TAG_SIZE;
+    const count = chunkCount(file.length, header.chunkSize);
+    if (file.length - HEADER_SIZE < TAG_SIZE) throw new Error('There is no complete chunk after the header.');
+
+    const key = await crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt']);
+    const parts = [];
+    let total = 0;
+    for (let i = 0; i < count; i++) {
+      const last = i === count - 1;
+      const start = HEADER_SIZE + i * sealedSize;
+      const sealed = file.subarray(start, last ? file.length : start + sealedSize);
+      let plain;
+      try {
+        plain = new Uint8Array(await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: chunkNonce(header.noncePrefix, i, last), additionalData: aad, tagLength: 128 },
+          key,
+          sealed,
+        ));
+      } catch {
+        throw Object.assign(new Error(`Chunk ${i + 1} of ${count} failed authentication.`), { chunk: i });
+      }
+      parts.push(plain);
+      total += plain.length;
+      if (onChunk) onChunk(i + 1, count);
+    }
+    const out = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      out.set(part, offset);
+      offset += part.length;
+    }
+    return { header, plain: out, chunks: count };
+  }
+
+  // What a file looks like from its first bytes, for reporting plain files and
+  // for checking recovered bytes against the header's media type.
+  function sniff(bytes) {
+    const ascii = (from, to) => String.fromCharCode(...bytes.subarray(from, to));
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'JPEG';
+    if (ascii(0, 8) === '\x89PNG\r\n\x1a\n') return 'PNG';
+    if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'WebP';
+    if (ascii(4, 8) === 'ftyp') {
+      const brand = ascii(8, 12);
+      return /^(heic|heix|hevc|mif1|msf1)$/.test(brand) ? 'HEIC' : 'MP4';
+    }
+    return null;
+  }
+
+  async function sha256(bytes) {
+    return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
+  }
+
+  return { HEADER_SIZE, MEDIA, toHex, parseKey, parseHeader, chunkCount, open, sniff, sha256 };
+})();
+</script>
+
+<script id="ui">
+const $ = (id) => document.getElementById(id);
+let loaded = null;
+let objectUrls = [];
+
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
+function facts(rows) {
+  return el('dl', {}, ...rows.flatMap(([label, value, mono]) => [
+    el('dt', { textContent: label }),
+    el('dd', { textContent: value, className: mono ? 'mono' : '' }),
+  ]));
+}
+
+function result(kind, title, ...body) {
+  return el('div', { className: `result ${kind}` }, el('h3', { textContent: title }), ...body);
+}
+
+function objectUrl(bytes, type) {
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  objectUrls.push(url);
+  return url;
+}
+
+function clearOutput() {
+  objectUrls.forEach((url) => URL.revokeObjectURL(url));
+  objectUrls = [];
+  $('result').replaceChildren();
+}
+
+async function onFile() {
+  clearOutput();
+  $('facts').replaceChildren();
+  loaded = null;
+  $('check').disabled = true;
+  const file = $('file').files[0];
+  if (!file) return;
+
+  let bytes;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch (error) {
+    $('facts').append(result('fail', "Couldn't read this file", el('p', { textContent: String(error.message || error) })));
+    return;
+  }
+  const rows = [
+    ['Name', file.name],
+    ['Size', `${bytes.length.toLocaleString()} bytes`],
+    ['SHA-256', await CLN1.sha256(bytes), true],
+  ];
+
+  let header;
+  try {
+    header = CLN1.parseHeader(bytes);
+  } catch (error) {
+    const plainType = CLN1.sniff(bytes);
+    $('facts').append(facts(rows), plainType
+      ? result('fail', `This is a plain ${plainType}, not an encrypted file`, el('p', { textContent: 'Anyone holding this file can open it, with no key.' }))
+      : result('warn', 'This is not a CLN1 file', el('p', { textContent: error.message })));
+    return;
+  }
+
+  rows.push(
+    ['Format', `CLN1 version ${header.version}, AES-256-GCM`],
+    ['Media', CLN1.MEDIA[header.media].name],
+    ['Chunk size', `${header.chunkSize.toLocaleString()} bytes`],
+    ['Chunks', String(CLN1.chunkCount(bytes.length, header.chunkSize))],
+    ['Key epoch', String(header.keyEpoch)],
+    ['Nonce prefix', CLN1.toHex(header.noncePrefix), true],
+    ['File ID', CLN1.toHex(header.fileId), true],
+  );
+  $('facts').append(facts(rows));
+  loaded = bytes;
+  $('check').disabled = false;
+}
+
+function limits() {
+  return el('div', { className: 'limits' },
+    el('p', { textContent: 'What this does not show:' }),
+    el('ul', {},
+      el('li', { textContent: "Where the file came from. If the app handed you this file, this is only an app-provided ciphertext check. It's stronger evidence if you got the file yourself." }),
+      el('li', { textContent: 'Who else holds the key. That needs a separate look at how keys are generated and shared.' }),
+      el('li', { textContent: 'That every app version, device or network path behaves the same way.' }),
+    ),
+  );
+}
+
+async function onCheck() {
+  clearOutput();
+  let rawKey;
+  try {
+    rawKey = CLN1.parseKey($('key').value);
+  } catch (error) {
+    $('result').replaceChildren(result('warn', 'Check the key', el('p', { textContent: error.message })));
+    return;
+  }
+
+  $('check').disabled = true;
+  const progress = el('p', { textContent: 'Opening…' });
+  $('result').replaceChildren(progress);
+  try {
+    const { header, plain, chunks } = await CLN1.open(loaded, rawKey, (done, count) => {
+      progress.textContent = `Chunk ${done} of ${count}`;
+    });
+    const media = CLN1.MEDIA[header.media];
+    const recovered = CLN1.sniff(plain);
+    const url = objectUrl(plain, media.mime);
+    const preview = header.media === 1
+      ? el('img', { src: url, alt: 'The recovered photo' })
+      : el('video', { src: url, controls: true });
+
+    $('result').replaceChildren(result('pass', `${media.noun} encryption check passed`,
+      el('p', { textContent: `This file is authenticated CLN1 ciphertext and decrypts locally with the supplied media key. Chunks authenticated: ${chunks} of ${chunks}, including the end-of-file marker, so the file wasn't altered or cut short.` }),
+      facts([
+        ['Recovered', `${recovered || 'Unknown format'}, ${plain.length.toLocaleString()} bytes`],
+        ['SHA-256', await CLN1.sha256(plain), true],
+      ]),
+      recovered === media.name ? '' : el('p', { textContent: `The header says ${media.name}, but the recovered bytes look like ${recovered || 'something else'}.` }),
+      el('p', { textContent: 'Check this is what you expected. A test photo should show the same ID you saved.' }),
+      preview,
+      el('a', { className: 'button', href: url, download: `recovered.${header.media === 1 ? 'jpg' : 'mp4'}`, textContent: 'Save the recovered file' }),
+      limits(),
+    ));
+  } catch (error) {
+    $('result').replaceChildren(result('fail', 'This file did not open',
+      el('p', { textContent: `${error.message} Either the key is wrong, or the file was changed or cut short. Nothing was recovered.` }),
+    ));
+  } finally {
+    rawKey.fill(0);
+    $('check').disabled = false;
+  }
+}
+
+// A photo that can't be mistaken for anything else: random noise that won't
+// compress away, with a random ID big enough to survive re-encoding.
+function onMakeTest() {
+  const id = CLN1.toHex(crypto.getRandomValues(new Uint8Array(6))).toUpperCase().replace(/(.{4})(?=.)/g, '$1-');
+  const canvas = el('canvas', { width: 1200, height: 1600 });
+  const g = canvas.getContext('2d');
+  const noise = g.createImageData(canvas.width, canvas.height);
+  for (let offset = 0; offset < noise.data.length; offset += 65536) {
+    crypto.getRandomValues(noise.data.subarray(offset, offset + 65536));
+  }
+  for (let alpha = 3; alpha < noise.data.length; alpha += 4) noise.data[alpha] = 255;
+  g.putImageData(noise, 0, 0);
+  g.fillStyle = '#ffffff';
+  g.fillRect(60, 620, 1080, 360);
+  g.fillStyle = '#111111';
+  g.textAlign = 'center';
+  g.font = 'bold 56px sans-serif';
+  g.fillText('Clann test photo', 600, 730);
+  g.font = 'bold 96px ui-monospace, Menlo, Consolas, monospace';
+  g.fillText(id, 600, 880);
+
+  canvas.toBlob(async (blob) => {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const url = URL.createObjectURL(blob);
+    $('test-photo').replaceChildren(
+      facts([['ID', id, true], ['SHA-256', await CLN1.sha256(bytes), true]]),
+      el('img', { src: url, alt: `Test photo with ID ${id}` }),
+      el('a', { className: 'button', href: url, download: `clann-test-${id}.jpg`, textContent: 'Save test photo' }),
+    );
+  }, 'image/jpeg', 0.9);
+}
+
+if (!globalThis.crypto || !crypto.subtle) $('no-crypto').hidden = false;
+$('file').addEventListener('change', onFile);
+$('check').addEventListener('click', onCheck);
+$('make-test').addEventListener('click', onMakeTest);
+</script>
+</body>
+</html>
