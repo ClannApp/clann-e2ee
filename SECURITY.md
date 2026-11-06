@@ -38,7 +38,10 @@ are aware of them and they are documented in
   by a bad human approval is treated as trusted from then on — including for the
   epoch commitments it signs
   ([§9.2](PROTOCOL.md#92-grant-time-trust-propagates-into-the-chain)).
-- Metadata is not encrypted (captions, comments, membership, timing, sizes).
+- Metadata is not encrypted (authorship, timing, filenames, sizes, source-file
+  hashes, reactions, subject tags, membership). The text of captions and
+  comments is sealed; see
+  [§8](PROTOCOL.md#8-what-is-encrypted-and-what-is-not).
 - Client-side rather than server-side wrap verification.
 - No forward secrecy within a group.
 - A compromised member device can read its groups.

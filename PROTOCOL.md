@@ -118,10 +118,10 @@ These are deliberate boundaries, discussed where they arise.
 - **First-contact identity.** A self-signature proves a record is internally
   consistent, not that it belongs to a particular person. Clann uses the same
   trust-on-first-use model as iMessage; §5.2.
-- **Metadata.** Authorship, timestamps, filenames, sizes, reactions, subject
-  tags, membership and the key-request graph are server-visible. The text of
-  captions and comments is sealed (§3.4), but who wrote each one and when is
-  not. §8.
+- **Metadata.** Authorship, timestamps, filenames, sizes, source-file hashes,
+  reactions, subject tags, membership and the key-request graph are
+  server-visible. The text of captions and comments is sealed (§3.4), but who
+  wrote each one and when is not. §8.
 - **Availability against a malicious member.** A member can upload an
   undecryptable key wrap. §9.1.
 - **A compromised member device**, as above.
@@ -842,7 +842,15 @@ what lets the recovery phrase self-serve.
   server-side filtering ("photos of Aoife"), so encrypting them would move that
   query onto the client; the trade is deliberate and unresolved.
 - Which groups and which items are encrypted; epoch numbers; upload times;
-  ciphertext sizes; media type; image dimensions.
+  ciphertext sizes; media type; image dimensions; video duration.
+- Each upload's filename, the date or time it was taken, and any event name and
+  date attached to it. EXIF itself is stripped, but this date is sent separately
+  so the timeline can be ordered.
+- A SHA-256 of each file picked for upload in the mobile app, sent before
+  encryption so that duplicates can be caught, and stored with the item. A photo
+  cannot be recovered from its hash, but the server can test whether a family
+  holds a file whose hash it already knows, and can see when two families upload
+  the same file.
 - All device public keys, attestations, and the key-request graph — who asked to
   be let in, who approved, and when.
 - Push notification metadata. Encrypted groups lose push image previews
@@ -854,9 +862,9 @@ what lets the recovery phrase self-serve.
   subject metadata attached to those older photos, unless separately purged.
 
 **Scope of claims.** The server can tell that a family exists, who is in it, how
-often they post and how large their photos are; it cannot see the photos.
-Product copy built on this scheme should scope its claims to image content
-accordingly.
+often they post and how large their photos are, and it can recognise a file
+whose hash it already knows; it cannot see the photos. Product copy built on
+this scheme should scope its claims to image content accordingly.
 
 Older photos in a group that switches on encryption stay plaintext until
 migrated. This is deliberate: encryption takes effect going forward
